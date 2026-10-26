@@ -169,3 +169,17 @@ dialog::backdrop { background: rgba(10, 18, 24, .45); }
 @media (prefers-reduced-motion: no-preference) {
   .sunbar .fill { transition: width .6s ease-out; }
 }
+
+/* sites */
+.site { gap: 14px; }
+.site-grid { display: grid; gap: 18px 28px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
+.site-grid h3 { margin-bottom: 6px; color: var(--muted); font-size: .95rem; }
+ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+tr.group th { background: var(--bg); color: var(--ink); font-size: .9rem; padding-top: 12px; }
+tr.group a { color: var(--ink); text-decoration: none; }
+.spec-set { border: 1px solid var(--line); border-radius: var(--r); padding: 10px 14px 12px; margin: 0; display: grid; gap: 8px; }
+.spec-set legend { font-weight: 600; padding: 0 4px; }
+.spec-rows { display: grid; gap: 8px; }
+.spec-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.spec-cell { display: grid; gap: 2px; flex: 1 1 120px; }
+.spec-cell span { font-size: .8rem; }

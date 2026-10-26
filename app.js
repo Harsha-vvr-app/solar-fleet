@@ -102,11 +102,12 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, systems, planned, settings, users };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users };
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
     document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name)));
+    if (name !== 'sites') window.scrollTo(0, 0);
     document.querySelectorAll('.side a[aria-current]').forEach((a) => a.setAttribute('aria-current', 'page'));
     main.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
     Promise.resolve(fn(arg)).catch((e) => { main.replaceChildren(h('p', { class: 'error' }, 'This page could not load: ' + (e.message || e))); });
@@ -287,7 +288,7 @@
   async function bills() {
     const [list, systemsList] = await Promise.all([
       q(sb.from('solar_eb_bills').select('*').order('uploaded_at', { ascending: false })),
-      q(sb.from('solar_systems').select('id, site, system').order('sort')),
+      loadSites(),
     ]);
     const waiting = list.filter((b) => b.status === 'Submitted');
     const table = (rows) => rows.length ? h('div', { class: 'table-wrap' }, h('table', null,
@@ -307,9 +308,18 @@
       h('section', null, h('h2', null, 'All bills'), h('div', { class: 'panel' }, table(list.filter((b) => b.status !== 'Submitted')))));
   }
 
-  function uploadBill(systemsList) {
-    const sys = select('bl-sys', '', [['', 'Choose a site'], ...systemsList.map((s) => [s.id, `${s.site}${s.system ? ' · ' + s.system : ''}`])]);
+  function uploadBill(sitesData, presetSite) {
+    const { sites, conns } = sitesData;
+    const sys = select('bl-site', presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
     sys.required = true;
+    const conn = select('bl-conn', '', [['', 'Choose the EB connection']]);
+    const fillConns = () => {
+      const mine = conns.filter((c) => c.site_id === sys.value);
+      conn.replaceChildren(...[['', mine.length ? 'Choose the EB connection' : 'No EB connections at this site yet'], ...mine.map((c) => [c.id, c.label + (c.service_no ? ' · ' + c.service_no : '')])]
+        .map(([v, l]) => h('option', { value: v }, l)));
+      if (mine.length === 1) { conn.value = String(mine[0].id); conn.dispatchEvent(new Event('change')); }
+    };
+    sys.addEventListener('change', fillConns);
     const f = {
       service: input('bl-service', ''), billDate: input('bl-date', '', { type: 'date' }),
       from: input('bl-from', '', { type: 'date' }), to: input('bl-to', '', { type: 'date' }),
@@ -318,6 +328,8 @@
       file: input('bl-file', '', { type: 'file', accept: 'application/pdf,image/*', required: true }),
       notes: h('textarea', { id: 'bl-notes' }),
     };
+    conn.addEventListener('change', () => { const c = conns.find((x) => String(x.id) === conn.value); if (c && c.service_no && !f.service.value) f.service.value = c.service_no; });
+    if (presetSite) setTimeout(fillConns);
     const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Submit for approval');
     const num = (el) => (el.value === '' ? null : +el.value);
     const form = h('form', { class: 'dlg', onsubmit: async (e) => {
@@ -326,13 +338,15 @@
       if (!file) return;
       btn.disabled = true; btn.textContent = 'Uploading…';
       try {
-        const s = systemsList.find((x) => x.id === sys.value);
+        const site = sites.find((x) => x.id === sys.value);
+        const c = conns.find((x) => String(x.id) === conn.value);
         const safe = file.name.replace(/[^\w.\-]+/g, '_');
         const path = `${sys.value}/${Date.now()}-${safe}`;
         const up = await sb.storage.from('solar-bills').upload(path, file, { contentType: file.type });
         if (up.error) throw up.error;
         await q(sb.from('solar_eb_bills').insert({
-          system_id: sys.value, site: `${s.site}${s.system ? ' · ' + s.system : ''}`, service_no: f.service.value.trim() || null,
+          site_id: sys.value, eb_connection_id: c ? c.id : null,
+          site: site.name + (c ? ' · ' + c.label : ''), service_no: f.service.value.trim() || null,
           bill_date: f.billDate.value || null, period_from: f.from.value || null, period_to: f.to.value || null,
           import_kwh: num(f.imp), export_kwh: num(f.exp), billed_kwh: num(f.billed), amount: num(f.amount),
           file_path: path, file_name: file.name, notes: f.notes.value.trim() || null,
@@ -345,7 +359,7 @@
       h('div', { class: 'dlg-head' }, h('h2', null, 'Upload an EB bill'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
       h('p', { class: 'muted' }, 'Copy the figures from the bill so they can be compared with the meters. Leave any you can\'t find blank.'),
       h('div', { class: 'form-grid' },
-        field('Site', sys, 'wide'), field('Service number', f.service), field('Bill date', f.billDate),
+        field('Site', sys), field('EB connection', conn), field('Service number', f.service), field('Bill date', f.billDate),
         field('Period from', f.from), field('Period to', f.to),
         field('Units imported (kWh)', f.imp), field('Units exported (kWh)', f.exp),
         field('Units billed (kWh)', f.billed), field('Amount (₹)', f.amount),
@@ -443,51 +457,196 @@
     box.replaceChildren(svg.node(), tip);
   }
 
-  /* ---------- systems ---------- */
-  const SYS_FIELDS = [
-    ['id', 'ID'], ['site', 'Site'], ['system', 'System'], ['type', 'Type', ['On-grid', 'Hybrid', 'Off-grid', 'Grid meter', '']],
-    ['rated_kw', 'Rated kW', 'number'], ['tracking', 'Tracking', ['Live', 'Pending', 'Not installed', 'Retired']],
-    ['inverters', 'Inverters'], ['panels', 'Panels'], ['panel_kwp', 'Panel kWp', 'number'], ['battery', 'Battery'],
-    ['tracked_via', 'Tracked via'], ['source_id', 'Source ID (device or station)'], ['daylight_target_kwh', 'Daylight grid import target (kWh)', 'number'],
-    ['spare', 'Spare / excess'], ['open_issue', 'Open issue', 'wide'], ['open_question', 'Open question', 'wide'],
-  ];
+  /* ---------- sites and systems ---------- */
+  async function loadSites() {
+    const [sites, conns] = await Promise.all([
+      q(sb.from('solar_sites').select('*').order('sort')),
+      q(sb.from('solar_eb_connections').select('*').order('sort')),
+    ]);
+    return { sites, conns };
+  }
+  const specText = {
+    inverter: (r) => `${r.kw ?? '?'} kW × ${r.count ?? '?'}`,
+    panel: (r) => `${r.watt ?? '?'} W × ${r.count ?? '?'}`,
+    battery: (r) => `${r.ah != null ? r.ah + ' Ah' : (r.type || 'Battery')} × ${r.count ?? '?'}${r.ah != null && r.type && r.type !== 'Lead-acid' ? ' ' + r.type : ''}`,
+  };
+  const specLine = (arr, kind) => (arr && arr.length ? arr.map(specText[kind]).join(' + ') : '—');
+  const nextSiteId = (name, sites) => {
+    let base = name.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'SITE';
+    let id = base, k = 2;
+    while (sites.some((x) => x.id === id)) id = base + '-' + k++;
+    return id;
+  };
+
+  async function sitesPage() {
+    const [{ sites, conns }, systemsList] = await Promise.all([loadSites(), q(sb.from('solar_system_status').select('*').order('sort'))]);
+    const cards = sites.map((site) => {
+      const mine = systemsList.filter((x) => x.site_id === site.id);
+      const ebs = conns.filter((c) => c.site_id === site.id);
+      return h('section', { class: 'panel site', id: 'site-' + site.id },
+        h('div', { class: 'sec-head' },
+          h('div', null, h('h2', null, site.name), site.address ? h('p', { class: 'muted' }, site.address) : null),
+          canWrite() ? h('div', { class: 'actions' },
+            h('button', { class: 'btn', onclick: () => editSite(site, sites) }, 'Edit site'),
+            h('button', { class: 'btn', onclick: () => editConn(null, site) }, 'Add EB connection'),
+            h('button', { class: 'btn', onclick: () => editSystem(null, site.id) }, 'Add system')) : null),
+        h('div', { class: 'site-grid' },
+          h('div', null, h('h3', null, 'EB connections'),
+            ebs.length ? h('ul', { class: 'plain' }, ebs.map((c) => h('li', null,
+              canWrite() ? h('button', { class: 'link', onclick: () => editConn(c, site) }, c.label) : c.label,
+              h('span', { class: 'muted' }, [c.service_no && ' · ' + c.service_no, c.tariff && ' · ' + c.tariff, c.sanctioned_kw != null && ` · ${c.sanctioned_kw} kW sanctioned`, c.phase && ' · ' + c.phase].filter(Boolean).join(''))))) : h('p', { class: 'muted' }, 'None added yet.')),
+          h('div', null, h('h3', null, 'Solar systems'),
+            mine.length ? h('ul', { class: 'plain' }, mine.map((x) => h('li', null,
+              h('button', { class: 'link', onclick: () => editSystem(x) }, `${x.id} · ${x.system || x.type || ''}`),
+              h('span', { class: 'muted' }, ` · ${x.tracking} · ${x.tracked_via}`)))) : h('p', { class: 'muted' }, 'No solar here.')),
+          h('div', null, h('h3', null, 'Extra items'), h('p', { class: site.extra_items ? null : 'muted' }, site.extra_items || 'None recorded.'),
+            site.notes ? h('p', { class: 'muted', style: 'margin-top:6px' }, site.notes) : null)));
+    });
+    main.replaceChildren(pageHead('Sites', 'Each site holds its EB connections, its solar systems and any extra items kept there.',
+      canWrite() ? h('button', { class: 'btn primary', onclick: () => editSite(null, sites) }, 'Add a site') : null), ...cards);
+    const target = location.hash.split('/')[1];
+    if (target) { const el = document.getElementById('site-' + target); if (el) el.scrollIntoView(); }
+  }
+
+  function editSite(site, sites) {
+    const isNew = !site;
+    const name = input('si-name', site && site.name, { required: true });
+    const address = input('si-address', site && site.address);
+    const extra = h('textarea', { id: 'si-extra', placeholder: 'Spare panels, spare inverters, batteries in storage…' }, (site && site.extra_items) || '');
+    const notes = h('textarea', { id: 'si-notes' }, (site && site.notes) || '');
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      const row = { name: name.value.trim(), address: address.value.trim() || null, extra_items: extra.value.trim() || null, notes: notes.value.trim() || null };
+      if (isNew) await q(sb.from('solar_sites').insert({ id: nextSiteId(row.name, sites), sort: sites.length + 1, ...row }));
+      else await q(sb.from('solar_sites').update(row).eq('id', site.id));
+      closeDialog(); toast(isNew ? 'Site added' : 'Site saved'); route();
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, isNew ? 'Add a site' : site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('div', { class: 'form-grid' }, field('Site name', name), field('Address', address), field('Extra items', extra, 'wide'), field('Notes', notes, 'wide')),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save site'))));
+  }
+
+  function editConn(c, site) {
+    const isNew = !c;
+    const label = input('eb-label', c ? c.label : site.name, { required: true });
+    const service = input('eb-service', c && c.service_no);
+    const tariff = input('eb-tariff', c && c.tariff, { placeholder: 'e.g. LT IA, LT CT' });
+    const phase = select('eb-phase', c && c.phase, [['', 'Not recorded'], 'Single phase', 'Three phase']);
+    const kw = input('eb-kw', c && c.sanctioned_kw, { type: 'number', step: 'any', min: 0 });
+    const ct = input('eb-ct', c && c.ct_multiplier, { type: 'number', step: 'any', min: 0 });
+    const notes = h('textarea', { id: 'eb-notes' }, (c && c.notes) || '');
+    const num = (el) => (el.value === '' ? null : +el.value);
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      const row = { label: label.value.trim(), service_no: service.value.trim() || null, tariff: tariff.value.trim() || null, phase: phase.value || null,
+        sanctioned_kw: num(kw), ct_multiplier: num(ct), notes: notes.value.trim() || null };
+      if (isNew) await q(sb.from('solar_eb_connections').insert({ site_id: site.id, ...row }));
+      else await q(sb.from('solar_eb_connections').update(row).eq('id', c.id));
+      closeDialog(); toast('EB connection saved'); route();
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, (isNew ? 'Add an EB connection · ' : '') + site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('div', { class: 'form-grid' }, field('Name', label), field('Service number', service), field('Tariff', tariff), field('Phase', phase),
+        field('Sanctioned load (kW)', kw), field('Meter CT multiplier', ct), field('Notes', notes, 'wide')),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
+  }
+
   async function systems() {
-    const list = await q(sb.from('solar_system_status').select('*').order('sort'));
+    const [list, { sites }] = await Promise.all([q(sb.from('solar_system_status').select('*').order('sort')), loadSites()]);
+    const groups = sites.map((site) => ({ site, rows: list.filter((x) => x.site_id === site.id) })).filter((g) => g.rows.length);
     const tbl = h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['ID', 'Site', 'System', 'Type', 'kW', 'Tracking', 'Tracked via', 'Expected/day', 'Attention'].map((c, i) => h('th', { class: i === 4 || i === 7 ? 'n' : null }, c)))),
-      h('tbody', null, list.map((s) => h('tr', { class: 'click', tabindex: 0, onclick: () => editSystem(s), onkeydown: (e) => { if (e.key === 'Enter') editSystem(s); } },
-        h('td', null, s.id), h('td', null, s.site), h('td', null, s.system || ''), h('td', null, s.type || ''),
-        h('td', { class: 'n' }, s.rated_kw ?? ''), h('td', null, s.tracking), h('td', null, s.tracked_via || ''),
-        h('td', { class: 'n' }, n1(s.expected_kwh)),
-        h('td', null, s.attention ? h('span', { class: 'chip ' + (s.attention === 'OK' ? 'ok' : s.attention === 'Open item' ? '' : 'bad') }, s.attention) : ''))))));
-    main.replaceChildren(pageHead('Systems', 'Every system in the master list. Click a row to edit it. Set Tracking to Live once its readings reach the sheet.',
+      h('thead', null, h('tr', null, ['ID', 'System', 'Type', 'kW', 'Panels', 'Battery', 'Tracking', 'Tracked via', 'Expected/day', 'Attention'].map((c, i) => h('th', { class: i === 3 || i === 8 ? 'n' : null }, c)))),
+      groups.map((g) => h('tbody', null,
+        h('tr', { class: 'group' }, h('th', { colspan: 10 }, h('a', { href: '#sites/' + g.site.id }, g.site.name))),
+        g.rows.map((s) => h('tr', { class: 'click', tabindex: 0, onclick: () => editSystem(s), onkeydown: (e) => { if (e.key === 'Enter') editSystem(s); } },
+          h('td', null, s.id), h('td', null, s.system || ''), h('td', null, s.type || ''), h('td', { class: 'n' }, s.rated_kw ?? ''),
+          h('td', null, specLine(s.panel_spec, 'panel')), h('td', null, specLine(s.battery_spec, 'battery')),
+          h('td', null, s.tracking), h('td', null, s.tracked_via || ''), h('td', { class: 'n' }, n1(s.expected_kwh)),
+          h('td', null, s.attention ? h('span', { class: 'chip ' + (s.attention === 'OK' ? 'ok' : s.attention === 'Open item' ? '' : 'bad') }, s.attention) : '')))))));
+    main.replaceChildren(pageHead('Systems', 'Every solar system and meter, grouped by site. Click a row to edit it. Set Tracking to Live once its readings reach the sheet.',
       canWrite() ? h('button', { class: 'btn primary', onclick: () => editSystem(null) }, 'Add a system') : null), h('section', { class: 'panel' }, tbl));
   }
-  function editSystem(s) {
+
+  // rows of {size, count} with "Add another" — used for inverters, panels and batteries
+  function specEditor(id, rows, cols) {
+    const box = h('div', { class: 'spec', id });
+    const list = h('div', { class: 'spec-rows' });
+    const addRow = (r = {}) => {
+      const cells = cols.map((c) => {
+        const el = c.options ? select(`${id}-${c.key}-${list.children.length}`, r[c.key] ?? c.options[0], c.options)
+          : input(`${id}-${c.key}-${list.children.length}`, r[c.key] ?? '', { type: 'number', step: 'any', min: 0, placeholder: c.label });
+        el.dataset.key = c.key; el.setAttribute('aria-label', c.label);
+        return h('label', { class: 'spec-cell' }, h('span', null, c.label), el);
+      });
+      const row = h('div', { class: 'spec-row' }, cells, h('button', { type: 'button', class: 'link', onclick: () => row.remove() }, 'Remove'));
+      list.append(row);
+    };
+    (rows && rows.length ? rows : [{}]).forEach(addRow);
+    box.append(list, h('button', { type: 'button', class: 'link', onclick: () => addRow() }, 'Add another'));
+    box.value = () => [...list.children].map((row) => {
+      const o = {};
+      row.querySelectorAll('[data-key]').forEach((el) => { const c = cols.find((x) => x.key === el.dataset.key); o[c.key] = c.options ? el.value : (el.value === '' ? null : +el.value); });
+      return o;
+    }).filter((o) => cols.some((c) => !c.options && o[c.key] != null));
+    return box;
+  }
+
+  async function editSystem(s, presetSite) {
     const isNew = !s;
-    const els = {};
-    const grid = h('div', { class: 'form-grid' }, SYS_FIELDS.map(([k, label, kind]) => {
-      let el;
-      if (Array.isArray(kind)) el = select('sy-' + k, s ? s[k] ?? '' : (k === 'tracking' ? 'Pending' : ''), kind);
-      else if (kind === 'wide') el = h('textarea', { id: 'sy-' + k }, s ? s[k] || '' : '');
-      else el = input('sy-' + k, s ? s[k] : '', kind === 'number' ? { type: 'number', step: 'any' } : {});
-      if (k === 'id' && !isNew) el.disabled = true;
-      if (!canWrite()) el.disabled = true;
-      els[k] = el;
-      return field(label, el, kind === 'wide' ? 'wide' : null);
-    }));
-    const form = h('form', { class: 'dlg', onsubmit: async (e) => {
+    const [{ sites, conns }, methods, all] = await Promise.all([
+      loadSites(), q(sb.from('solar_tracking_methods').select('name').order('sort')), q(sb.from('solar_systems').select('id'))]);
+    const ro = !canWrite();
+    const nextId = () => { let k = 1; while (all.some((x) => x.id === 'S' + String(k).padStart(2, '0'))) k++; return 'S' + String(k).padStart(2, '0'); };
+    const id = input('sy-id', s ? s.id : nextId(), { required: true });
+    if (!isNew) id.disabled = true;
+    const site = select('sy-site', s ? s.site_id : presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
+    site.required = true;
+    const conn = select('sy-conn', '', [['', 'Not linked']]);
+    const fillConns = () => {
+      const mine = conns.filter((c) => c.site_id === site.value);
+      conn.replaceChildren(...[['', mine.length ? 'Not linked' : 'No EB connections at this site'], ...mine.map((c) => [String(c.id), c.label + (c.service_no ? ' · ' + c.service_no : '')])].map(([v, l]) => h('option', { value: v }, l)));
+      conn.value = s && s.eb_connection_id && mine.some((c) => c.id === s.eb_connection_id) ? String(s.eb_connection_id) : '';
+    };
+    site.addEventListener('change', fillConns); fillConns();
+    const system = input('sy-system', s && s.system, { placeholder: 'e.g. 20 kW off-grid, back roof' });
+    const type = select('sy-type', s ? s.type || '' : 'Off-grid', ['On-grid', 'Hybrid', 'Off-grid', 'Grid meter']);
+    const kw = input('sy-kw', s && s.rated_kw, { type: 'number', step: 'any', min: 0 });
+    const tracking = select('sy-tracking', s ? s.tracking : 'Pending', ['Live', 'Pending', 'Not installed', 'Retired']);
+    const via = select('sy-via', s ? s.tracked_via : 'Not tracked yet', methods.map((m) => m.name));
+    const source = input('sy-source', s && s.source_id, { placeholder: 'Device ID or station ID' });
+    const inv = specEditor('sy-inv', s && s.inverter_spec, [{ key: 'kw', label: 'kW each' }, { key: 'count', label: 'Number' }]);
+    const pan = specEditor('sy-pan', s && s.panel_spec, [{ key: 'watt', label: 'Watts each' }, { key: 'count', label: 'Number' }]);
+    const bat = specEditor('sy-bat', s && s.battery_spec, [{ key: 'ah', label: 'Ah each' }, { key: 'count', label: 'Number' }, { key: 'type', label: 'Type', options: ['Lead-acid', 'Lithium', 'Lithium 51.2 V', 'Other'] }]);
+    const target = input('sy-target', s && s.daylight_target_kwh, { type: 'number', step: 'any', min: 0 });
+    const issue = h('textarea', { id: 'sy-issue' }, (s && s.open_issue) || '');
+    const question = h('textarea', { id: 'sy-question' }, (s && s.open_question) || '');
+    const notes = h('textarea', { id: 'sy-notes' }, (s && s.notes) || '');
+    const kwp = h('p', { class: 'muted' });
+    const showKwp = () => { const v = d3.sum(pan.value(), (r) => (r.watt || 0) * (r.count || 0)) / 1000; kwp.textContent = v ? `Panels add up to ${d3.format(',.2f')(v)} kWp.` : ''; };
+    pan.addEventListener('input', showKwp); pan.addEventListener('click', () => setTimeout(showKwp)); showKwp();
+    const els = [id, site, conn, system, type, kw, tracking, via, source, target, issue, question, notes];
+    if (ro) { els.forEach((e) => { e.disabled = true; }); }
+    const num = (el) => (el.value === '' ? null : +el.value);
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
       e.preventDefault();
-      const row = {};
-      SYS_FIELDS.forEach(([k, , kind]) => { const v = els[k].value.trim(); row[k] = v === '' ? null : kind === 'number' ? +v : v; });
-      if (!row.id || !row.site) { toast('ID and site are needed.', true); return; }
-      if (isNew) await q(sb.from('solar_systems').insert(row));
-      else { delete row.id; await q(sb.from('solar_systems').update(row).eq('id', s.id)); }
-      closeDialog(); toast('Saved'); route();
+      if (!site.value) { toast('Choose a site.', true); site.focus(); return; }
+      const row = { site_id: site.value, eb_connection_id: conn.value ? +conn.value : null, system: system.value.trim() || null, type: type.value,
+        rated_kw: num(kw), tracking: tracking.value, tracked_via: via.value, source_id: source.value.trim() || null,
+        inverter_spec: inv.value(), panel_spec: pan.value(), battery_spec: bat.value(), daylight_target_kwh: num(target),
+        open_issue: issue.value.trim() || null, open_question: question.value.trim() || null, notes: notes.value.trim() || null };
+      if (isNew) await q(sb.from('solar_systems').insert({ id: id.value.trim().toUpperCase(), sort: all.length + 1, ...row }));
+      else await q(sb.from('solar_systems').update(row).eq('id', s.id));
+      closeDialog(); toast(isNew ? 'System added' : 'Saved'); route();
     } },
       h('div', { class: 'dlg-head' }, h('h2', null, isNew ? 'Add a system' : `${s.id} · ${s.site}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
-      grid, canWrite() ? h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save')) : null);
-    openDialog(form);
+      h('div', { class: 'form-grid' },
+        field('Site', site), field('ID', id), field('System name', system), field('Type', type),
+        field('Rated kW', kw), field('EB connection', conn), field('Tracking', tracking), field('Tracked via', via),
+        field('Device or station ID', source), field('Daylight grid import target (kWh)', target)),
+      h('fieldset', { class: 'spec-set' }, h('legend', null, 'Inverters'), inv),
+      h('fieldset', { class: 'spec-set' }, h('legend', null, 'Panels'), pan, kwp),
+      h('fieldset', { class: 'spec-set' }, h('legend', null, 'Batteries'), bat),
+      h('div', { class: 'form-grid' }, field('Open issue', issue, 'wide'), field('Open question', question, 'wide'), field('Notes', notes, 'wide')),
+      ro ? null : h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, isNew ? 'Add system' : 'Save'))));
   }
 
   /* ---------- planned work ---------- */
