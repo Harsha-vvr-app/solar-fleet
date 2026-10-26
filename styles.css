@@ -183,3 +183,39 @@ tr.group a { color: var(--ink); text-decoration: none; }
 .spec-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .spec-cell { display: grid; gap: 2px; flex: 1 1 120px; }
 .spec-cell span { font-size: .8rem; }
+
+/* tickets: filters, inline actions, photos */
+.filters { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin-bottom: 12px; }
+.filters .field { width: min(100%, 240px); }
+label.check { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-size: .95rem; padding-bottom: 8px; cursor: pointer; }
+label.check input { width: auto; }
+.btn.small { padding: 3px 10px; font-size: .85rem; }
+td.row-actions { white-space: nowrap; text-align: right; }
+td.row-actions .btn + .btn { margin-left: 6px; }
+.photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 10px 0; }
+.photo { display: grid; gap: 4px; font-size: .8rem; text-decoration: none; color: var(--ink); }
+.photo img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--r); border: 1px solid var(--line); background: var(--bg); }
+.photo > span:first-child { display: grid; place-items: center; aspect-ratio: 4 / 3; border: 1px dashed var(--line); border-radius: var(--r); padding: 6px; word-break: break-all; }
+.panel form.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.panel form.actions input[type=file] { width: auto; flex: 1 1 220px; }
+
+/* EB bill month grid */
+table.bill-grid th.conn { font-weight: 500; white-space: nowrap; text-align: left; }
+table.bill-grid td.bill-cell { padding: 4px; text-align: center; min-width: 74px; }
+.bill-chip { display: inline-grid; gap: 0; font: 500 .8rem/1.25 var(--body); padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; font-variant-numeric: tabular-nums; }
+.bill-chip .a { color: var(--muted); font-size: .75rem; }
+.bill-chip.ok { border-color: var(--ok); background: var(--ok-soft); }
+.bill-chip.wait { border-color: var(--sun); background: var(--sun-soft); }
+.bill-chip.bad { border-color: var(--bad); background: var(--bad-soft); }
+p.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+p.legend .bill-chip { cursor: default; }
+.cell-add { width: 100%; min-height: 34px; border: 1px dashed transparent; border-radius: 6px; background: none; color: var(--line); font-size: 1rem; cursor: pointer; }
+td.empty-cell:hover .cell-add, .cell-add:focus-visible { border-color: var(--line); color: var(--muted); }
+
+/* capacity */
+.site-cap { font-variant-numeric: tabular-nums; margin-top: 2px; }
+ul.queue li { padding: 6px 0; border-top: 1px solid var(--line); }
+ul.queue li:first-child { border-top: 0; }
+td.nw { white-space: nowrap; }
+table.bill-grid th { padding: 8px 6px; }
+table.bill-grid td.bill-cell { min-width: 66px; }

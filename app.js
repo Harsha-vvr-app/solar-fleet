@@ -117,10 +117,12 @@
 
   /* ---------- overview ---------- */
   async function overview() {
-    const [status, gen, open] = await Promise.all([
+    const [status, gen, open, notLive, waitingBills] = await Promise.all([
       q(sb.from('solar_system_status').select('*').eq('tracking', 'Live').neq('type', 'Grid meter').order('sort')),
       q(sb.from('solar_generation').select('date, system_id, kwh, note').gte('date', addDays(today(), -15)).order('date')),
       q(sb.from('solar_tickets').select('id, due, status, type').neq('status', 'Closed')),
+      q(sb.from('solar_systems').select('id, tracking, type').not('tracking', 'in', '("Live","Retired")')),
+      q(sb.from('solar_eb_bills').select('*').eq('status', 'Submitted').order('uploaded_at')),
     ]);
     const withExp = status.filter((s) => s.expected_kwh != null);
     const ids = withExp.map((s) => s.id);
@@ -160,10 +162,19 @@
         h('div', { class: 'spark' }, spark(mine, day)),
         h('span', { class: 'chip ' + (chipCls || '') }, att === 'Open item' ? 'OK' : att || 'OK'));
     }));
-    main.replaceChildren(head, fleet,
+    const pendingSys = notLive.filter((x) => x.tracking !== 'Not installed').length;
+    const plannedSys = notLive.length - pendingSys;
+    const leftOff = notLive.length ? h('p', { class: 'muted' }, h('a', { href: '#systems' },
+      [pendingSys && `${pendingSys} system${pendingSys > 1 ? 's' : ''} not tracked yet`, plannedSys && `${plannedSys} planned install${plannedSys > 1 ? 's' : ''}`].filter(Boolean).join(' and ')),
+      ' are left off this list.') : null;
+    const queue = waitingBills.length ? h('section', null, h('h2', null, isOwner() ? 'Bills waiting for your approval' : 'Bills waiting for approval'),
+      h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, waitingBills.map((b) => h('li', null,
+        h('button', { class: 'link', onclick: () => billDetail(b) }, b.site),
+        h('span', { class: 'muted' }, ` · ${b.period_to ? 'period to ' + fmtDate(b.period_to) : fmtDate(b.bill_date)} · ${n0(b.billed_kwh ?? b.import_kwh)} units${b.amount != null ? ' · ₹' + d3.format(',.0f')(b.amount) : ''} · from ${b.uploaded_by_name || 'admin'}`)))))) : null;
+    main.replaceChildren(...[head, queue, fleet].filter(Boolean),
       h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Each system against its expected day'),
         h('p', { class: 'muted' }, 'The line marks the expected day. Red when a system made under 60% of it.')),
-        h('div', { class: 'panel' }, rows)));
+        h('div', { class: 'panel' }, rows), leftOff));
   }
 
   function spark(rows, lastDay) {
@@ -185,45 +196,117 @@
 
   /* ---------- tickets ---------- */
   let ticketTab = 'open';
+  const ticketFilter = { site: '', mine: false };
   async function tickets() {
-    const [all, systemsList] = await Promise.all([
+    const [all, systemsList, { sites }] = await Promise.all([
       q(sb.from('solar_tickets').select('*').order('id', { ascending: false })),
-      q(sb.from('solar_systems').select('id, site, system').order('sort')),
+      q(sb.from('solar_systems').select('id, site, site_id, system').order('sort')),
+      loadSites(),
     ]);
+    const siteOf = Object.fromEntries(systemsList.map((x) => [x.id, x.site_id]));
     const t0 = today();
     const isOver = (t) => t.due && t.due < t0 && t.status !== 'Closed';
+    const myName = (state.me.name || '').trim().toLowerCase();
+    const passes = (t) => (!ticketFilter.site || siteOf[t.system_id] === ticketFilter.site)
+      && (!ticketFilter.mine || (t.assigned_to || '').trim().toLowerCase() === myName);
     const tabs = [
       ['open', 'Open faults and issues', (t) => t.status !== 'Closed' && t.type !== 'Setup'],
       ['setup', 'Setup questions', (t) => t.status !== 'Closed' && t.type === 'Setup'],
       ['closed', 'Closed', (t) => t.status === 'Closed'],
     ];
     const body = h('div');
+    const tabBar = h('div', { class: 'tabs', role: 'tablist' });
+
+    async function setStatus(t, status, extra = {}) {
+      await q(sb.from('solar_tickets').update({ status, ...extra }).eq('id', t.id));
+      Object.assign(t, { status, ...extra });
+      toast(status === 'Closed' ? tno(t.id) + ' closed' : tno(t.id) + ' started');
+      refreshCounts(); drawTabs(); draw();
+    }
+    function closeTicket(t) {
+      const res = h('textarea', { id: 'cl-res', required: true, placeholder: 'What was found and what was done' }, t.resolution || '');
+      const files = input('cl-files', '', { type: 'file', accept: 'image/*,application/pdf', multiple: true });
+      const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Close ticket');
+      openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+        e.preventDefault();
+        if (!res.value.trim()) { res.focus(); return; }
+        btn.disabled = true; btn.textContent = 'Closing…';
+        try {
+          await uploadTicketPhotos(t.id, files.files);
+          closeDialog();
+          await setStatus(t, 'Closed', { resolution: res.value.trim() });
+        } catch (err) { toast(err.message || 'Could not close the ticket', true); btn.disabled = false; btn.textContent = 'Close ticket'; }
+      } },
+        h('div', { class: 'dlg-head' }, h('h2', null, `Close ${tno(t.id)} · ${t.reason}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+        h('p', { class: 'muted' }, t.site || t.system_id || ''),
+        h('div', { class: 'form-grid' }, field('Resolution', res, 'wide'), field('Photos of the fix (optional)', files, 'wide')),
+        h('div', { class: 'actions' }, btn)));
+    }
     function draw() {
       const [, , f] = tabs.find((x) => x[0] === ticketTab);
-      let list = all.filter(f);
+      let list = all.filter((t) => f(t) && passes(t));
       if (ticketTab !== 'closed') list.sort((a, b) => (isOver(b) - isOver(a)) || String(a.due || '9999').localeCompare(String(b.due || '9999')) || a.id - b.id);
+      const open = (t) => { location.hash = 'ticket/' + t.id; };
       body.replaceChildren(list.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, ['Ticket', 'Raised', ticketTab === 'closed' ? 'Closed' : 'Due', 'System', 'Reason', 'Status', 'Assigned to'].map((c) => h('th', null, c)))),
+        h('thead', null, h('tr', null, ['Ticket', 'Raised', ticketTab === 'closed' ? 'Closed' : 'Due', 'System', 'Reason', 'Status', 'Assigned to', ''].map((c) => h('th', null, c)))),
         h('tbody', null, list.map((t) => h('tr', { class: 'click' + (isOver(t) ? ' overdue' : ''), tabindex: 0,
-          onclick: () => { location.hash = 'ticket/' + t.id; },
-          onkeydown: (e) => { if (e.key === 'Enter') location.hash = 'ticket/' + t.id; } },
-          h('td', null, tno(t.id)), h('td', null, fmtDay(t.raised)),
-          h('td', { class: isOver(t) ? 'due-bad' : null }, ticketTab === 'closed' ? fmtDay(t.closed_on) : (t.due ? fmtDay(t.due) + (isOver(t) ? ' · overdue' : '') : 'No deadline')),
+          onclick: (e) => { if (!e.target.closest('button')) open(t); },
+          onkeydown: (e) => { if (e.key === 'Enter' && e.target.tagName === 'TR') open(t); } },
+          h('td', { class: 'nw' }, tno(t.id)), h('td', { class: 'nw' }, fmtDay(t.raised)),
+          h('td', { class: 'nw' + (isOver(t) ? ' due-bad' : '') }, ticketTab === 'closed' ? fmtDay(t.closed_on) : (t.due ? fmtDay(t.due) + (isOver(t) ? ' · overdue' : '') : 'No deadline')),
           h('td', null, t.site || t.system_id || '—'), h('td', null, t.reason),
           h('td', null, h('span', { class: 'chip ' + (t.status === 'Open' ? 'bad' : t.status === 'Closed' ? 'ok' : 'amber') }, t.status)),
-          h('td', null, t.assigned_to || '—'))))))
-        : h('p', { class: 'empty' }, ticketTab === 'closed' ? 'No closed tickets yet.' : 'Nothing open here.'));
+          h('td', null, t.assigned_to || '—'),
+          h('td', { class: 'row-actions' }, canWrite() && t.status !== 'Closed' ? [
+            t.status === 'Open' ? h('button', { class: 'btn small', onclick: () => setStatus(t, 'In progress', t.assigned_to ? {} : { assigned_to: state.me.name }) }, 'Start') : null,
+            h('button', { class: 'btn small', onclick: () => closeTicket(t) }, 'Close')] : null))))))
+        : h('p', { class: 'empty' }, ticketTab === 'closed' ? 'No closed tickets match.' : 'Nothing open here.'));
     }
-    const tabBar = h('div', { class: 'tabs', role: 'tablist' }, tabs.map(([k, l, f]) => h('button', {
-      role: 'tab', 'aria-selected': String(ticketTab === k),
-      onclick: (e) => { ticketTab = k; tabBar.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b === e.currentTarget))); draw(); },
-    }, `${l} (${all.filter(f).length})`)));
-    draw();
+    function drawTabs() {
+      tabBar.replaceChildren(...tabs.map(([k, l, f]) => h('button', {
+        role: 'tab', 'aria-selected': String(ticketTab === k),
+        onclick: () => { ticketTab = k; drawTabs(); draw(); },
+      }, `${l} (${all.filter((t) => f(t) && passes(t)).length})`)));
+    }
+    const siteSel = select('tk-site', ticketFilter.site, [['', 'All sites'], ...sites.map((x) => [x.id, x.name])]);
+    siteSel.addEventListener('change', () => { ticketFilter.site = siteSel.value; drawTabs(); draw(); });
+    const mine = h('input', { type: 'checkbox', id: 'tk-mine' }); mine.checked = ticketFilter.mine;
+    mine.addEventListener('change', () => { ticketFilter.mine = mine.checked; drawTabs(); draw(); });
+    const filters = h('div', { class: 'filters' }, field('Site', siteSel), h('label', { class: 'check', for: 'tk-mine' }, mine, ' Assigned to me'));
+    drawTabs(); draw();
     main.replaceChildren(
-      pageHead('Tickets', 'Faults are raised every night from the meter data and are due within a week. Close a ticket by writing what was done.',
+      pageHead('Tickets', 'Faults are raised every night from the meter data and are due within a week. Start a ticket when work begins; close it by writing what was done.',
         canWrite() ? h('button', { class: 'btn', onclick: async () => { await q(sb.rpc('solar_run_checks_now')); toast('Checks run'); route(); refreshCounts(); } }, 'Run checks now') : null,
         canWrite() ? h('button', { class: 'btn primary', onclick: () => newTicket(systemsList) }, 'New ticket') : null),
-      h('section', { class: 'panel' }, tabBar, body));
+      h('section', { class: 'panel' }, filters, tabBar, body));
+  }
+
+  async function uploadTicketPhotos(ticketId, fileList) {
+    for (const file of [...(fileList || [])]) {
+      const path = `${ticketId}/${Date.now()}-${file.name.replace(/[^\w.\-]+/g, '_')}`;
+      const up = await sb.storage.from('solar-tickets').upload(path, file, { contentType: file.type });
+      if (up.error) throw up.error;
+      await q(sb.from('solar_ticket_photos').insert({ ticket_id: ticketId, path, file_name: file.name, uploaded_by: state.user.id, uploaded_by_name: state.me.name }));
+    }
+  }
+
+  async function photoPanel(t, ro) {
+    const rows = await q(sb.from('solar_ticket_photos').select('*').eq('ticket_id', t.id).order('created_at'));
+    const urls = rows.length ? (await sb.storage.from('solar-tickets').createSignedUrls(rows.map((r) => r.path), 600)).data || [] : [];
+    const gallery = h('div', { class: 'photos' }, rows.length ? rows.map((r, i) => {
+      const url = urls[i] && urls[i].signedUrl;
+      const isImg = /\.(jpe?g|png|webp|heic)$/i.test(r.path);
+      return h('a', { class: 'photo', href: url || '#', target: '_blank', rel: 'noopener' },
+        isImg && url ? h('img', { src: url, alt: r.file_name || 'Photo', loading: 'lazy' }) : h('span', null, r.file_name || 'File'),
+        h('span', { class: 'muted' }, `${r.uploaded_by_name || ''} · ${d3.timeFormat('%-d %b')(new Date(r.created_at))}`));
+    }) : h('p', { class: 'muted' }, 'No photos yet.'));
+    const files = input('ph-files', '', { type: 'file', accept: 'image/*,application/pdf', multiple: true });
+    const add = ro ? null : h('form', { class: 'actions', onsubmit: async (e) => {
+      e.preventDefault();
+      if (!files.files.length) return;
+      await uploadTicketPhotos(t.id, files.files); toast('Photos added'); route();
+    } }, files, h('button', { class: 'btn', type: 'submit' }, 'Add photos'));
+    return h('section', { class: 'panel' }, h('h3', null, 'Photos'), gallery, add);
   }
 
   function newTicket(systemsList) {
@@ -265,6 +348,7 @@
       h('div', { class: 'form-grid' }, field('Status', status), field('Assigned to', assigned), field('Due', due), field('Resolution', resolution, 'wide')),
       h('div', { class: 'actions' }, save));
 
+    const photos = await photoPanel(t, ro);
     const noteBox = h('textarea', { id: 'tk-note', placeholder: 'Add an update: a site visit, a call, a part ordered' });
     const noteList = h('div', { class: 'notes' }, notes.length ? notes.map((n) => h('div', { class: 'note' + (n.author ? '' : ' system') },
       h('div', { class: 'meta' }, `${n.author_name || 'System'} · ${d3.timeFormat('%-d %b, %H:%M')(new Date(n.created_at))}`), h('p', null, n.body)))
@@ -280,35 +364,65 @@
       h('p', null, h('a', { href: '#tickets' }, 'All tickets')),
       pageHead(`${tno(t.id)} · ${t.reason}`, `${t.type} · ${t.site || t.system_id || 'No system'} · raised ${fmtDate(t.raised)}${t.closed_on ? ' · closed ' + fmtDate(t.closed_on) : ''}`),
       t.details ? h('section', { class: 'panel' }, h('h3', null, 'What the check saw'), h('p', null, t.details)) : null,
-      form,
+      form, photos,
       h('section', { class: 'panel' }, h('h3', null, 'Notes'), noteList, ro ? null : noteForm));
   }
 
   /* ---------- EB bills ---------- */
+  // A bill belongs to the month its period ends in (or its bill date when there is no period).
+  const billMonth = (b) => (b.period_to || b.bill_date || b.uploaded_at || '').slice(0, 7);
   async function bills() {
-    const [list, systemsList] = await Promise.all([
+    const [list, sitesData] = await Promise.all([
       q(sb.from('solar_eb_bills').select('*').order('uploaded_at', { ascending: false })),
       loadSites(),
     ]);
+    const { sites, conns } = sitesData;
+    const now = today().slice(0, 7);
+    const months = d3.range(11, -1, -1).map((k) => { const d = new Date(Date.parse(now + '-01T00:00:00Z')); d.setUTCMonth(d.getUTCMonth() - k); return d.toISOString().slice(0, 7); });
+    const mLabel = (m) => d3.utcFormat('%b %y')(new Date(m + '-01T00:00:00Z'));
     const waiting = list.filter((b) => b.status === 'Submitted');
-    const table = (rows) => rows.length ? h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Site', 'Service no.', 'Period', 'Imported kWh', 'Exported kWh', 'Billed kWh', 'Amount ₹', 'Status', ''].map((c, i) => h('th', { class: i >= 3 && i <= 6 ? 'n' : null }, c)))),
+    const unassigned = list.filter((b) => !b.eb_connection_id);
+
+    const cell = (c, m) => {
+      const here = list.filter((b) => b.eb_connection_id === c.id && billMonth(b) === m);
+      if (!here.length) {
+        return h('td', { class: 'bill-cell empty-cell' }, canWrite()
+          ? h('button', { class: 'cell-add', 'aria-label': `Upload the ${mLabel(m)} bill for ${c.label}`, onclick: () => uploadBill(sitesData, c.site_id, c.id, m) }, '+') : '');
+      }
+      return h('td', { class: 'bill-cell' }, here.map((b) => h('button', {
+        class: 'bill-chip ' + (b.status === 'Approved' ? 'ok' : b.status === 'Rejected' ? 'bad' : 'wait'), onclick: () => billDetail(b),
+        title: `${b.site} · ${b.status === 'Submitted' ? 'awaiting approval' : b.status.toLowerCase()}` },
+        h('span', { class: 'u' }, n0(b.billed_kwh ?? b.import_kwh)), h('span', { class: 'a' }, b.amount == null ? '' : '₹' + d3.format('.3~s')(b.amount)))));
+    };
+    const grid = h('div', { class: 'table-wrap' }, h('table', { class: 'bill-grid' },
+      h('thead', null, h('tr', null, h('th', null, 'EB connection'), months.map((m) => h('th', { class: 'n' }, mLabel(m))))),
+      sites.filter((site) => conns.some((c) => c.site_id === site.id)).map((site) => h('tbody', null,
+        h('tr', { class: 'group' }, h('th', { colspan: months.length + 1 }, h('a', { href: '#sites/' + site.id }, site.name))),
+        conns.filter((c) => c.site_id === site.id).map((c) => h('tr', null,
+          h('th', { class: 'conn' }, c.label, c.service_no ? h('span', { class: 'muted' }, ' · ' + c.service_no) : null),
+          months.map((m) => cell(c, m))))))));
+
+    const plainTable = (rows) => h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, ['Site', 'Period', 'Billed kWh', 'Amount ₹', 'Status', ''].map((c, i) => h('th', { class: i === 2 || i === 3 ? 'n' : null }, c)))),
       h('tbody', null, rows.map((b) => h('tr', null,
-        h('td', null, b.site), h('td', null, b.service_no || '—'),
-        h('td', null, b.period_from ? `${fmtDay(b.period_from)} to ${fmtDate(b.period_to)}` : fmtDate(b.bill_date)),
-        h('td', { class: 'n' }, n0(b.import_kwh)), h('td', { class: 'n' }, n0(b.export_kwh)), h('td', { class: 'n' }, n0(b.billed_kwh)),
-        h('td', { class: 'n' }, b.amount == null ? '—' : d3.format(',.0f')(b.amount)),
+        h('td', null, b.site), h('td', null, b.period_from ? `${fmtDay(b.period_from)} to ${fmtDate(b.period_to)}` : fmtDate(b.bill_date)),
+        h('td', { class: 'n' }, n0(b.billed_kwh ?? b.import_kwh)), h('td', { class: 'n' }, b.amount == null ? '—' : d3.format(',.0f')(b.amount)),
         h('td', null, h('span', { class: 'chip ' + (b.status === 'Approved' ? 'ok' : b.status === 'Rejected' ? 'bad' : 'amber') }, b.status === 'Submitted' ? 'Awaiting approval' : b.status)),
-        h('td', null, h('button', { class: 'link', onclick: () => billDetail(b) }, 'Open')))))))
-      : h('p', { class: 'empty' }, 'No bills here.');
-    main.replaceChildren(
-      pageHead('EB bills', 'The admin uploads each bill with its key figures. The owner approves or rejects it.',
-        canWrite() ? h('button', { class: 'btn primary', onclick: () => uploadBill(systemsList) }, 'Upload a bill') : null),
-      h('section', null, h('h2', null, isOwner() ? 'Waiting for your approval' : 'Waiting for approval'), h('div', { class: 'panel' }, table(waiting))),
-      h('section', null, h('h2', null, 'All bills'), h('div', { class: 'panel' }, table(list.filter((b) => b.status !== 'Submitted')))));
+        h('td', null, h('button', { class: 'link', onclick: () => billDetail(b) }, 'Open')))))));
+
+    main.replaceChildren(...[
+      pageHead('EB bills', 'One row per EB connection, one column per month. Click a blank cell to upload that month\'s bill; click a bill to open or approve it.',
+        canWrite() ? h('button', { class: 'btn primary', onclick: () => uploadBill(sitesData) }, 'Upload a bill') : null),
+      waiting.length ? h('section', null, h('h2', null, isOwner() ? 'Waiting for your approval' : 'Waiting for approval'), h('div', { class: 'panel' }, plainTable(waiting))) : null,
+      h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Last 12 months'),
+        h('p', { class: 'legend' }, h('span', { class: 'bill-chip ok' }, 'Approved'), h('span', { class: 'bill-chip wait' }, 'Awaiting approval'), h('span', { class: 'bill-chip bad' }, 'Rejected'))),
+        h('p', { class: 'muted' }, 'Bills are filed under the month their period ends. TNEB bills most connections every two months, so a blank month between two bills is normal.'),
+        h('div', { class: 'panel' }, grid)),
+      unassigned.length ? h('section', null, h('h2', null, 'Bills not linked to an EB connection'), h('div', { class: 'panel' }, plainTable(unassigned))) : null].filter(Boolean));
+    grid.scrollLeft = grid.scrollWidth; // newest months first in view
   }
 
-  function uploadBill(sitesData, presetSite) {
+  function uploadBill(sitesData, presetSite, presetConn, presetMonth) {
     const { sites, conns } = sitesData;
     const sys = select('bl-site', presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
     sys.required = true;
@@ -317,11 +431,12 @@
       const mine = conns.filter((c) => c.site_id === sys.value);
       conn.replaceChildren(...[['', mine.length ? 'Choose the EB connection' : 'No EB connections at this site yet'], ...mine.map((c) => [c.id, c.label + (c.service_no ? ' · ' + c.service_no : '')])]
         .map(([v, l]) => h('option', { value: v }, l)));
-      if (mine.length === 1) { conn.value = String(mine[0].id); conn.dispatchEvent(new Event('change')); }
+      const pick = presetConn && mine.some((c) => c.id === presetConn) ? presetConn : mine.length === 1 ? mine[0].id : null;
+      if (pick != null) { conn.value = String(pick); conn.dispatchEvent(new Event('change')); }
     };
     sys.addEventListener('change', fillConns);
     const f = {
-      service: input('bl-service', ''), billDate: input('bl-date', '', { type: 'date' }),
+      service: input('bl-service', ''), billDate: input('bl-date', presetMonth ? presetMonth + '-01' : '', { type: 'date' }),
       from: input('bl-from', '', { type: 'date' }), to: input('bl-to', '', { type: 'date' }),
       imp: input('bl-imp', '', { type: 'number', step: 'any', min: 0 }), exp: input('bl-exp', '', { type: 'number', step: 'any', min: 0 }),
       billed: input('bl-billed', '', { type: 'number', step: 'any', min: 0 }), amount: input('bl-amount', '', { type: 'number', step: 'any', min: 0 }),
@@ -468,8 +583,18 @@
   const specText = {
     inverter: (r) => `${r.kw ?? '?'} kW × ${r.count ?? '?'}`,
     panel: (r) => `${r.watt ?? '?'} W × ${r.count ?? '?'}`,
-    battery: (r) => `${r.ah != null ? r.ah + ' Ah' : (r.type || 'Battery')} × ${r.count ?? '?'}${r.ah != null && r.type && r.type !== 'Lead-acid' ? ' ' + r.type : ''}`,
+    battery: (r) => `${r.ah != null ? r.ah + ' Ah' : (r.type || 'Battery')}${voltOf(r) ? ' ' + voltOf(r) + ' V' : ''} × ${r.count ?? '?'}${r.ah != null && r.type && r.type !== 'Lead-acid' ? ' ' + r.type.replace(/ 51\.2 V$/, '') : ''}`,
   };
+  const voltOf = (r) => r.volt ?? (r.type === 'Lead-acid' ? 12 : r.type === 'Lithium 51.2 V' ? 51.2 : null);
+  const cap = (s) => {
+    const inv = d3.sum(s.inverter_spec || [], (r) => (r.kw || 0) * (r.count || 0)) || (+s.rated_kw || 0);
+    const kwp = d3.sum(s.panel_spec || [], (r) => (r.watt || 0) * (r.count || 0)) / 1000 || (+s.panel_kwp || 0);
+    const bat = d3.sum(s.battery_spec || [], (r) => (r.ah || 0) * (voltOf(r) || 0) * (r.count || 0)) / 1000;
+    return { inv, kwp, bat, ratio: inv && kwp ? kwp / inv : null };
+  };
+  const RATIO_HIGH = 1.4;
+  const capSum = (list) => list.reduce((a, s) => { const c = cap(s); return { inv: a.inv + c.inv, kwp: a.kwp + c.kwp, bat: a.bat + c.bat }; }, { inv: 0, kwp: 0, bat: 0 });
+  const capText = (c) => [c.inv && `${n1(c.inv)} kW inverters`, c.kwp && `${n1(c.kwp)} kWp panels`, c.bat && `${n1(c.bat)} kWh batteries`].filter(Boolean).join(' · ');
   const specLine = (arr, kind) => (arr && arr.length ? arr.map(specText[kind]).join(' + ') : '—');
   const nextSiteId = (name, sites) => {
     let base = name.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'SITE';
@@ -485,7 +610,8 @@
       const ebs = conns.filter((c) => c.site_id === site.id);
       return h('section', { class: 'panel site', id: 'site-' + site.id },
         h('div', { class: 'sec-head' },
-          h('div', null, h('h2', null, site.name), site.address ? h('p', { class: 'muted' }, site.address) : null),
+          h('div', null, h('h2', null, site.name), site.address ? h('p', { class: 'muted' }, site.address) : null,
+            mine.length ? h('p', { class: 'site-cap' }, capText(capSum(mine.filter((x) => x.tracking !== 'Retired'))) || 'No capacity recorded') : null),
           canWrite() ? h('div', { class: 'actions' },
             h('button', { class: 'btn', onclick: () => editSite(site, sites) }, 'Edit site'),
             h('button', { class: 'btn', onclick: () => editConn(null, site) }, 'Add EB connection'),
@@ -502,7 +628,8 @@
           h('div', null, h('h3', null, 'Extra items'), h('p', { class: site.extra_items ? null : 'muted' }, site.extra_items || 'None recorded.'),
             site.notes ? h('p', { class: 'muted', style: 'margin-top:6px' }, site.notes) : null)));
     });
-    main.replaceChildren(pageHead('Sites', 'Each site holds its EB connections, its solar systems and any extra items kept there.',
+    const fleetCap = capSum(systemsList.filter((x) => x.tracking !== 'Retired' && x.tracking !== 'Not installed'));
+    main.replaceChildren(pageHead('Sites', `Each site holds its EB connections, its solar systems and any extra items kept there. Installed across all sites: ${capText(fleetCap)}.`,
       canWrite() ? h('button', { class: 'btn primary', onclick: () => editSite(null, sites) }, 'Add a site') : null), ...cards);
     const target = location.hash.split('/')[1];
     if (target) { const el = document.getElementById('site-' + target); if (el) el.scrollIntoView(); }
@@ -554,15 +681,19 @@
     const [list, { sites }] = await Promise.all([q(sb.from('solar_system_status').select('*').order('sort')), loadSites()]);
     const groups = sites.map((site) => ({ site, rows: list.filter((x) => x.site_id === site.id) })).filter((g) => g.rows.length);
     const tbl = h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['ID', 'System', 'Type', 'kW', 'Panels', 'Battery', 'Tracking', 'Tracked via', 'Expected/day', 'Attention'].map((c, i) => h('th', { class: i === 3 || i === 8 ? 'n' : null }, c)))),
+      h('thead', null, h('tr', null, ['ID', 'System', 'Type', 'Inverter kW', 'Panel kWp', 'Panels ÷ inverter', 'Battery kWh', 'Tracking', 'Tracked via', 'Expected/day', 'Attention'].map((c, i) => h('th', { class: [3, 4, 5, 6, 9].includes(i) ? 'n' : null }, c)))),
       groups.map((g) => h('tbody', null,
-        h('tr', { class: 'group' }, h('th', { colspan: 10 }, h('a', { href: '#sites/' + g.site.id }, g.site.name))),
+        h('tr', { class: 'group' }, h('th', { colspan: 11 }, h('a', { href: '#sites/' + g.site.id }, g.site.name), h('span', { class: 'muted' }, ' · ' + (capText(capSum(g.rows.filter((x) => x.tracking !== 'Retired'))) || 'no capacity recorded')))),
         g.rows.map((s) => h('tr', { class: 'click', tabindex: 0, onclick: () => editSystem(s), onkeydown: (e) => { if (e.key === 'Enter') editSystem(s); } },
-          h('td', null, s.id), h('td', null, s.system || ''), h('td', null, s.type || ''), h('td', { class: 'n' }, s.rated_kw ?? ''),
-          h('td', null, specLine(s.panel_spec, 'panel')), h('td', null, specLine(s.battery_spec, 'battery')),
+          h('td', null, s.id), h('td', null, s.system || ''), h('td', null, s.type || ''),
+          ...(() => { const c = cap(s); return [
+            h('td', { class: 'n', title: specLine(s.inverter_spec, 'inverter') }, c.inv ? n1(c.inv) : '—'),
+            h('td', { class: 'n', title: specLine(s.panel_spec, 'panel') }, c.kwp ? n1(c.kwp) : '—'),
+            h('td', { class: 'n' }, c.ratio == null ? '—' : c.ratio > RATIO_HIGH ? h('span', { class: 'chip warn', title: 'More panel than the inverter can use; it will clip on sunny days.' }, d3.format('.2f')(c.ratio)) : d3.format('.2f')(c.ratio)),
+            h('td', { class: 'n', title: specLine(s.battery_spec, 'battery') }, c.bat ? n1(c.bat) : '—')]; })(),
           h('td', null, s.tracking), h('td', null, s.tracked_via || ''), h('td', { class: 'n' }, n1(s.expected_kwh)),
           h('td', null, s.attention ? h('span', { class: 'chip ' + (s.attention === 'OK' ? 'ok' : s.attention === 'Open item' ? '' : 'bad') }, s.attention) : '')))))));
-    main.replaceChildren(pageHead('Systems', 'Every solar system and meter, grouped by site. Click a row to edit it. Set Tracking to Live once its readings reach the sheet.',
+    main.replaceChildren(pageHead('Systems', `Every solar system and meter, grouped by site. Click a row to edit it. Panels ÷ inverter above ${RATIO_HIGH} is flagged: the extra panel is lost to clipping at midday.`,
       canWrite() ? h('button', { class: 'btn primary', onclick: () => editSystem(null) }, 'Add a system') : null), h('section', { class: 'panel' }, tbl));
   }
 
@@ -615,14 +746,17 @@
     const source = input('sy-source', s && s.source_id, { placeholder: 'Device ID or station ID' });
     const inv = specEditor('sy-inv', s && s.inverter_spec, [{ key: 'kw', label: 'kW each' }, { key: 'count', label: 'Number' }]);
     const pan = specEditor('sy-pan', s && s.panel_spec, [{ key: 'watt', label: 'Watts each' }, { key: 'count', label: 'Number' }]);
-    const bat = specEditor('sy-bat', s && s.battery_spec, [{ key: 'ah', label: 'Ah each' }, { key: 'count', label: 'Number' }, { key: 'type', label: 'Type', options: ['Lead-acid', 'Lithium', 'Lithium 51.2 V', 'Other'] }]);
+    const bat = specEditor('sy-bat', s && s.battery_spec, [{ key: 'ah', label: 'Ah each' }, { key: 'volt', label: 'Volts each' }, { key: 'count', label: 'Number' }, { key: 'type', label: 'Type', options: ['Lead-acid', 'Lithium', 'Lithium 51.2 V', 'Other'] }]);
     const target = input('sy-target', s && s.daylight_target_kwh, { type: 'number', step: 'any', min: 0 });
     const issue = h('textarea', { id: 'sy-issue' }, (s && s.open_issue) || '');
     const question = h('textarea', { id: 'sy-question' }, (s && s.open_question) || '');
     const notes = h('textarea', { id: 'sy-notes' }, (s && s.notes) || '');
     const kwp = h('p', { class: 'muted' });
-    const showKwp = () => { const v = d3.sum(pan.value(), (r) => (r.watt || 0) * (r.count || 0)) / 1000; kwp.textContent = v ? `Panels add up to ${d3.format(',.2f')(v)} kWp.` : ''; };
-    pan.addEventListener('input', showKwp); pan.addEventListener('click', () => setTimeout(showKwp)); showKwp();
+    const showKwp = () => {
+      const c = cap({ inverter_spec: inv.value(), panel_spec: pan.value(), battery_spec: bat.value(), rated_kw: kw.value });
+      kwp.textContent = [c.kwp && `Panels add up to ${d3.format(',.2f')(c.kwp)} kWp`, c.ratio && `${d3.format('.2f')(c.ratio)} × the inverter${c.ratio > RATIO_HIGH ? ' (high: it will clip at midday)' : ''}`, c.bat && `batteries store ${n1(c.bat)} kWh`].filter(Boolean).join(' · ');
+    };
+    [inv, pan, bat, kw].forEach((el) => { el.addEventListener('input', showKwp); el.addEventListener('change', showKwp); el.addEventListener('click', () => setTimeout(showKwp)); }); showKwp();
     const els = [id, site, conn, system, type, kw, tracking, via, source, target, issue, question, notes];
     if (ro) { els.forEach((e) => { e.disabled = true; }); }
     const num = (el) => (el.value === '' ? null : +el.value);
