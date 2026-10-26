@@ -1,0 +1,2 @@
+supabase.js and 591.supabase.js: @supabase/supabase-js 2.45.4 (MIT)
+d3-7.9.0.min.js: d3 7.9.0 (ISC)
