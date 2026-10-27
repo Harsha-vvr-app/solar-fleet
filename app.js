@@ -120,7 +120,7 @@
     const [status, gen, open, notLive, waitingBills] = await Promise.all([
       q(sb.from('solar_system_status').select('*').eq('tracking', 'Live').neq('type', 'Grid meter').order('sort')),
       q(sb.from('solar_generation').select('date, system_id, kwh, note').gte('date', addDays(today(), -15)).order('date')),
-      q(sb.from('solar_tickets').select('id, due, status, type').neq('status', 'Closed')),
+      q(sb.from('solar_tickets').select('*').neq('status', 'Closed')),
       q(sb.from('solar_systems').select('id, tracking, type').not('tracking', 'in', '("Live","Retired")')),
       q(sb.from('solar_eb_bills').select('*').eq('status', 'Submitted').order('uploaded_at')),
     ]);
@@ -132,7 +132,8 @@
     const actual = d3.sum(gen.filter((g) => g.date === day && ids.includes(g.system_id)), (g) => +g.kwh || 0);
     const pct = expected ? Math.round((actual / expected) * 100) : null;
     const overdue = open.filter((t) => t.due && t.due < today() && t.type !== 'Setup').length;
-    const faults = open.filter((t) => t.type !== 'Setup').length;
+    const faults = open.filter((t) => t.type !== 'Setup' && t.type !== 'Task').length;
+    const tasks = open.filter((t) => t.type === 'Task').sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999')));
 
     const fig = (v, l, cls) => h('div', { class: 'fig' + (cls ? ' ' + cls : '') }, h('div', { class: 'v' }, v), h('div', { class: 'l' }, l));
     const head = pageHead('Overview', `${status.length} live systems. Expected figures are each system's average over its last 14 good days.`);
@@ -142,7 +143,8 @@
         fig(n0(actual), 'units made on ' + fmtDay(day)),
         fig(pct == null ? '—' : pct + '%', 'of expected', pct != null && pct < 75 ? 'low' : pct != null && pct < 90 ? 'mid' : null)),
       h('div', { class: 'fleet-figs' },
-        fig(String(faults), 'open tickets', faults ? null : null),
+        fig(String(faults), 'open tickets'),
+        fig(String(tasks.length), 'open tasks'),
         fig(String(overdue), 'overdue', overdue ? 'low' : null)));
 
     const rows = h('div', { class: 'sys-rows' }, status.map((s) => {
@@ -171,7 +173,17 @@
       h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, waitingBills.map((b) => h('li', null,
         h('button', { class: 'link', onclick: () => billDetail(b) }, b.site),
         h('span', { class: 'muted' }, ` · ${b.period_to ? 'period to ' + fmtDate(b.period_to) : fmtDate(b.bill_date)} · ${n0(b.billed_kwh ?? b.import_kwh)} units${b.amount != null ? ' · ₹' + d3.format(',.0f')(b.amount) : ''} · from ${b.uploaded_by_name || 'admin'}`)))))) : null;
-    main.replaceChildren(...[head, queue, fleet].filter(Boolean),
+    const t0 = today();
+    const taskSec = h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Open tasks'),
+        canWrite() ? h('button', { class: 'btn', onclick: async () => newTask((await loadSites()).sites) }, 'New task') : null),
+      h('div', { class: 'panel' }, tasks.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, ['Due', 'Site', 'Task', 'Assigned to', ''].map((c) => h('th', null, c)))),
+        h('tbody', null, tasks.map((t) => h('tr', { class: 'click' + (t.due < t0 ? ' overdue' : ''), onclick: (e) => { if (!e.target.closest('button')) location.hash = 'ticket/' + t.id; } },
+          h('td', { class: 'nw' + (t.due < t0 ? ' due-bad' : '') }, t.due ? fmtDay(t.due) + (t.due < t0 ? ' · overdue' : t.due === t0 ? ' · today' : '') : '—'),
+          h('td', null, t.site || '—'), h('td', null, t.reason), h('td', null, t.assigned_to || '—'),
+          h('td', { class: 'row-actions' }, canWrite() ? h('button', { class: 'btn small', onclick: () => closeTicketDialog(t, () => { route(); refreshCounts(); }) }, 'Done') : null))))))
+        : h('p', { class: 'empty' }, 'No open tasks. Add one from here or from a site card.')));
+    main.replaceChildren(...[head, queue, fleet, taskSec].filter(Boolean),
       h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Each system against its expected day'),
         h('p', { class: 'muted' }, 'The line marks the expected day. Red when a system made under 60% of it.')),
         h('div', { class: 'panel' }, rows), leftOff));
@@ -207,10 +219,11 @@
     const t0 = today();
     const isOver = (t) => t.due && t.due < t0 && t.status !== 'Closed';
     const myName = (state.me.name || '').trim().toLowerCase();
-    const passes = (t) => (!ticketFilter.site || siteOf[t.system_id] === ticketFilter.site)
+    const passes = (t) => (!ticketFilter.site || (t.site_id || siteOf[t.system_id]) === ticketFilter.site)
       && (!ticketFilter.mine || (t.assigned_to || '').trim().toLowerCase() === myName);
     const tabs = [
-      ['open', 'Open faults and issues', (t) => t.status !== 'Closed' && t.type !== 'Setup'],
+      ['open', 'Open faults and issues', (t) => t.status !== 'Closed' && t.type !== 'Setup' && t.type !== 'Task'],
+      ['tasks', 'Tasks', (t) => t.status !== 'Closed' && t.type === 'Task'],
       ['setup', 'Setup questions', (t) => t.status !== 'Closed' && t.type === 'Setup'],
       ['closed', 'Closed', (t) => t.status === 'Closed'],
     ];
@@ -223,25 +236,7 @@
       toast(status === 'Closed' ? tno(t.id) + ' closed' : tno(t.id) + ' started');
       refreshCounts(); drawTabs(); draw();
     }
-    function closeTicket(t) {
-      const res = h('textarea', { id: 'cl-res', required: true, placeholder: 'What was found and what was done' }, t.resolution || '');
-      const files = input('cl-files', '', { type: 'file', accept: 'image/*,application/pdf', multiple: true });
-      const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Close ticket');
-      openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
-        e.preventDefault();
-        if (!res.value.trim()) { res.focus(); return; }
-        btn.disabled = true; btn.textContent = 'Closing…';
-        try {
-          await uploadTicketPhotos(t.id, files.files);
-          closeDialog();
-          await setStatus(t, 'Closed', { resolution: res.value.trim() });
-        } catch (err) { toast(err.message || 'Could not close the ticket', true); btn.disabled = false; btn.textContent = 'Close ticket'; }
-      } },
-        h('div', { class: 'dlg-head' }, h('h2', null, `Close ${tno(t.id)} · ${t.reason}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
-        h('p', { class: 'muted' }, t.site || t.system_id || ''),
-        h('div', { class: 'form-grid' }, field('Resolution', res, 'wide'), field('Photos of the fix (optional)', files, 'wide')),
-        h('div', { class: 'actions' }, btn)));
-    }
+    const closeTicket = (t) => closeTicketDialog(t, () => { Object.assign(t, { status: 'Closed' }); refreshCounts(); drawTabs(); draw(); });
     function draw() {
       const [, , f] = tabs.find((x) => x[0] === ticketTab);
       let list = all.filter((t) => f(t) && passes(t));
@@ -259,7 +254,7 @@
           h('td', null, t.assigned_to || '—'),
           h('td', { class: 'row-actions' }, canWrite() && t.status !== 'Closed' ? [
             t.status === 'Open' ? h('button', { class: 'btn small', onclick: () => setStatus(t, 'In progress', t.assigned_to ? {} : { assigned_to: state.me.name }) }, 'Start') : null,
-            h('button', { class: 'btn small', onclick: () => closeTicket(t) }, 'Close')] : null))))))
+            h('button', { class: 'btn small', onclick: () => closeTicket(t) }, t.type === 'Task' ? 'Done' : 'Close')] : null))))))
         : h('p', { class: 'empty' }, ticketTab === 'closed' ? 'No closed tickets match.' : 'Nothing open here.'));
     }
     function drawTabs() {
@@ -277,8 +272,50 @@
     main.replaceChildren(
       pageHead('Tickets', 'Faults are raised every night from the meter data and are due within a week. Start a ticket when work begins; close it by writing what was done.',
         canWrite() ? h('button', { class: 'btn', onclick: async () => { await q(sb.rpc('solar_run_checks_now')); toast('Checks run'); route(); refreshCounts(); } }, 'Run checks now') : null,
+        canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites, ticketFilter.site, () => { ticketTab = 'tasks'; route(); }) }, 'New task') : null,
         canWrite() ? h('button', { class: 'btn primary', onclick: () => newTicket(systemsList) }, 'New ticket') : null),
       h('section', { class: 'panel' }, filters, tabBar, body));
+  }
+
+  function closeTicketDialog(t, onDone) {
+    const isTask = t.type === 'Task';
+    const res = h('textarea', { id: 'cl-res', required: true, placeholder: isTask ? 'What was done' : 'What was found and what was done' }, t.resolution || '');
+    const files = input('cl-files', '', { type: 'file', accept: 'image/*,application/pdf', multiple: true });
+    const btn = h('button', { class: 'btn primary', type: 'submit' }, isTask ? 'Mark done' : 'Close ticket');
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      if (!res.value.trim()) { res.focus(); return; }
+      btn.disabled = true;
+      try {
+        await uploadTicketPhotos(t.id, files.files);
+        await q(sb.from('solar_tickets').update({ status: 'Closed', resolution: res.value.trim() }).eq('id', t.id));
+        t.resolution = res.value.trim();
+        closeDialog(); toast(isTask ? 'Task done' : tno(t.id) + ' closed'); onDone && onDone();
+      } catch (err) { toast(err.message || 'Could not close it', true); btn.disabled = false; }
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, `${isTask ? 'Finish' : 'Close'} ${tno(t.id)} · ${t.reason}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('p', { class: 'muted' }, t.site || t.system_id || ''),
+      h('div', { class: 'form-grid' }, field(isTask ? 'What was done' : 'Resolution', res, 'wide'), field('Photos (optional)', files, 'wide')),
+      h('div', { class: 'actions' }, btn)));
+  }
+
+  function newTask(sites, presetSite, onDone) {
+    const site = select('ta-site', presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
+    site.required = true;
+    const reason = input('ta-reason', '', { required: true, placeholder: 'For example: clean panels, fix earthing, replace battery cables' });
+    const details = h('textarea', { id: 'ta-details' });
+    const due = input('ta-due', addDays(today(), 7), { type: 'date', required: true });
+    const assigned = input('ta-assigned', '');
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      const st = sites.find((x) => x.id === site.value);
+      await q(sb.from('solar_tickets').insert({ type: 'Task', site_id: site.value, site: st ? st.name : null, reason: reason.value.trim(),
+        details: details.value.trim() || null, due: due.value, assigned_to: assigned.value.trim() || null }));
+      closeDialog(); toast('Task added'); refreshCounts(); onDone ? onDone() : route();
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, 'New task'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('div', { class: 'form-grid' }, field('Site', site, 'wide'), field('What needs doing', reason, 'wide'), field('Details', details, 'wide'), field('Due by', due), field('Assigned to', assigned)),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Add task'))));
   }
 
   async function uploadTicketPhotos(ticketId, fileList) {
@@ -363,7 +400,7 @@
     main.replaceChildren(
       h('p', null, h('a', { href: '#tickets' }, 'All tickets')),
       pageHead(`${tno(t.id)} · ${t.reason}`, `${t.type} · ${t.site || t.system_id || 'No system'} · raised ${fmtDate(t.raised)}${t.closed_on ? ' · closed ' + fmtDate(t.closed_on) : ''}`),
-      t.details ? h('section', { class: 'panel' }, h('h3', null, 'What the check saw'), h('p', null, t.details)) : null,
+      t.details ? h('section', { class: 'panel' }, h('h3', null, t.auto ? 'What the check saw' : 'Details'), h('p', null, t.details)) : null,
       form, photos,
       h('section', { class: 'panel' }, h('h3', null, 'Notes'), noteList, ro ? null : noteForm));
   }
@@ -605,8 +642,10 @@
 
   const SITE_TYPES = ['Hostel', 'School', 'Office', 'Hotel', 'Residence', 'Shop', 'Construction site'];
   async function sitesPage() {
-    const [{ sites, conns }, systemsList] = await Promise.all([loadSites(), q(sb.from('solar_system_status').select('*').order('sort'))]);
+    const [{ sites, conns }, systemsList, openTasks] = await Promise.all([loadSites(), q(sb.from('solar_system_status').select('*').order('sort')),
+      q(sb.from('solar_tickets').select('id, site_id, reason, due').eq('type', 'Task').neq('status', 'Closed').order('due'))]);
     const w = canWrite();
+    const t0 = today();
     const card = (site) => {
       const mine = systemsList.filter((x) => x.site_id === site.id);
       const ebs = conns.filter((c) => c.site_id === site.id);
@@ -622,10 +661,13 @@
           c.service_no ? h('span', { class: 'muted' }, ' ' + c.service_no) : null])) : h('span', { class: 'muted' }, 'none')),
         line('Solar', mine.length ? h('span', null, mine.flatMap((x, i) => [i ? ', ' : '', h('button', { class: 'link', onclick: () => editSystem(x) }, x.id),
           h('span', { class: 'muted' }, ' ' + (x.system || x.type || '') + (x.tracking !== 'Live' ? ` (${x.tracking.toLowerCase()})` : ''))])) : h('span', { class: 'muted' }, 'none')),
+        (() => { const mt = openTasks.filter((t) => t.site_id === site.id); return mt.length ? line('Tasks', h('span', null, mt.flatMap((t, i) => [i ? h('br') : '',
+          h('a', { href: '#ticket/' + t.id, class: t.due < t0 ? 'due-bad' : null }, t.reason), h('span', { class: t.due < t0 ? 'due-bad' : 'muted' }, ' · ' + (t.due ? fmtDay(t.due) : 'no date'))]))) : null; })(),
         site.extra_items ? line('Extra', h('span', { class: 'sc-clamp', title: site.extra_items }, site.extra_items)) : null,
         w ? h('div', { class: 'sc-actions' },
           h('button', { class: 'link small', onclick: () => editConn(null, site) }, '+ EB connection'),
-          h('button', { class: 'link small', onclick: () => editSystem(null, site.id) }, '+ System')) : null);
+          h('button', { class: 'link small', onclick: () => editSystem(null, site.id) }, '+ System'),
+          h('button', { class: 'link small', onclick: () => newTask(sites, site.id) }, '+ Task')) : null);
     };
     const types = [...new Set(sites.map((x) => (x.site_type || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     const groups = [...types.map((t) => [t, sites.filter((x) => (x.site_type || '').trim() === t)]), ['Type not set', sites.filter((x) => !(x.site_type || '').trim())]]

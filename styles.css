@@ -229,7 +229,7 @@ h2.grp-title { margin: 22px 0 10px; }
 .sc-head h3 { font-size: 1.02rem; margin: 0; }
 .sc-addr { font-size: .82rem; }
 .site-card .site-cap { font-size: .82rem; color: var(--warn); margin: 0; }
-.sc-line { display: grid; grid-template-columns: 50px minmax(0, 1fr); gap: 6px; }
+.sc-line { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 6px; }
 .sc-k { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; padding-top: 2px; }
 .sc-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .sc-actions { display: flex; gap: 14px; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--line); }
@@ -265,3 +265,4 @@ h2.grp-title { margin: 22px 0 10px; }
   .sysx-stats { grid-column: 1 / -1; grid-row: 2; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sysx-exp { display: none; }
 }
+.due-bad { color: var(--bad); font-weight: 600; }
