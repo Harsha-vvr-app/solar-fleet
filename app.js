@@ -684,24 +684,64 @@
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
   }
 
+  const sysFilter = { q: '', type: '', status: '' };
   async function systems() {
     const [list, { sites }] = await Promise.all([q(sb.from('solar_system_status').select('*').order('sort')), loadSites()]);
-    const groups = sites.map((site) => ({ site, rows: list.filter((x) => x.site_id === site.id) })).filter((g) => g.rows.length);
-    const tbl = h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['ID', 'System', 'Type', 'Inverter kW', 'Panel kWp', 'Panels ÷ inverter', 'Battery kWh', 'Tracking', 'Tracked via', 'Expected/day', 'Attention'].map((c, i) => h('th', { class: [3, 4, 5, 6, 9].includes(i) ? 'n' : null }, c)))),
-      groups.map((g) => h('tbody', null,
-        h('tr', { class: 'group' }, h('th', { colspan: 11 }, h('a', { href: '#sites/' + g.site.id }, g.site.name), h('span', { class: 'muted' }, ' · ' + (capText(capSum(g.rows.filter((x) => x.tracking !== 'Retired'))) || 'no capacity recorded')))),
-        g.rows.map((s) => h('tr', { class: 'click', tabindex: 0, onclick: () => editSystem(s), onkeydown: (e) => { if (e.key === 'Enter') editSystem(s); } },
-          h('td', null, s.id), h('td', null, s.system || ''), h('td', null, s.type || ''),
-          ...(() => { const c = cap(s); return [
-            h('td', { class: 'n', title: specLine(s.inverter_spec, 'inverter') }, c.inv ? n1(c.inv) : '—'),
-            h('td', { class: 'n', title: specLine(s.panel_spec, 'panel') }, c.kwp ? n1(c.kwp) : '—'),
-            h('td', { class: 'n' }, c.ratio == null ? '—' : c.ratio > RATIO_HIGH ? h('span', { class: 'chip warn', title: 'More panel than the inverter can use; it will clip on sunny days.' }, d3.format('.2f')(c.ratio)) : d3.format('.2f')(c.ratio)),
-            h('td', { class: 'n', title: specLine(s.battery_spec, 'battery') }, c.bat ? n1(c.bat) : '—')]; })(),
-          h('td', null, s.tracking), h('td', null, s.tracked_via || ''), h('td', { class: 'n' }, n1(s.expected_kwh)),
-          h('td', null, s.attention ? h('span', { class: 'chip ' + (s.attention === 'OK' ? 'ok' : s.attention === 'Open item' ? '' : 'bad') }, s.attention) : '')))))));
-    main.replaceChildren(pageHead('Systems', `Every solar system and meter, grouped by site. Click a row to edit it. Panels ÷ inverter above ${RATIO_HIGH} is flagged: the extra panel is lost to clipping at midday.`,
-      canWrite() ? h('button', { class: 'btn primary', onclick: () => editSystem(null) }, 'Add a system') : null), h('section', { class: 'panel' }, tbl));
+    const body = h('div');
+    const stat = (label, value, title, cls) => h('div', { class: 'stat' + (cls ? ' ' + cls : ''), title: title || null },
+      h('span', { class: 'stat-v' }, value), h('span', { class: 'stat-l' }, label));
+    const statusChip = (s) => {
+      if (s.tracking !== 'Live') return h('span', { class: 'chip' }, s.tracking === 'Pending' ? 'Not tracked yet' : s.tracking);
+      if (!s.attention || s.attention === 'OK' || s.attention === 'Open item') return h('span', { class: 'chip ok' }, 'OK');
+      return h('span', { class: 'chip bad' }, s.attention);
+    };
+    const row = (s) => {
+      const c = cap(s);
+      const high = c.ratio != null && c.ratio > RATIO_HIGH;
+      return h('div', { class: 'sysx' + (s.tracking === 'Live' ? '' : ' dim'), tabindex: 0, role: 'button',
+        onclick: () => editSystem(s), onkeydown: (e) => { if (e.key === 'Enter') editSystem(s); } },
+        h('div', { class: 'sysx-name' },
+          h('div', null, h('span', { class: 'sysx-id' }, s.id), h('strong', null, s.system || s.type || 'Unnamed')),
+          h('div', { class: 'muted' }, [s.type, s.tracked_via && s.tracked_via !== 'Not tracked yet' ? 'via ' + s.tracked_via : null].filter(Boolean).join(' · '))),
+        h('div', { class: 'sysx-stats' },
+          stat('inverter', c.inv ? n1(c.inv) + ' kW' : '—', specLine(s.inverter_spec, 'inverter')),
+          stat('panels', c.kwp ? n1(c.kwp) + ' kWp' : '—', specLine(s.panel_spec, 'panel')),
+          stat('panel ÷ inverter', c.ratio == null ? '—' : d3.format('.2f')(c.ratio) + '×', high ? 'More panel than the inverter can use; the extra is lost at midday.' : null, high ? 'warn' : null),
+          stat('battery', c.bat ? n1(c.bat) + ' kWh' : '—', specLine(s.battery_spec, 'battery'))),
+        h('div', { class: 'sysx-exp' }, s.expected_kwh != null ? [h('span', { class: 'stat-v' }, n1(s.expected_kwh)), h('span', { class: 'stat-l' }, 'units / day')] : h('span', { class: 'muted' }, '—')),
+        h('div', { class: 'sysx-chip' }, statusChip(s)));
+    };
+    const matches = (s) => {
+      const t = sysFilter.q.trim().toLowerCase();
+      if (t && ![s.id, s.system, s.site, s.type, s.tracked_via].join(' ').toLowerCase().includes(t)) return false;
+      if (sysFilter.type && s.type !== sysFilter.type) return false;
+      if (sysFilter.status === 'attention' && !(s.tracking === 'Live' && s.attention && !['OK', 'Open item'].includes(s.attention))) return false;
+      if (sysFilter.status === 'live' && s.tracking !== 'Live') return false;
+      if (sysFilter.status === 'notlive' && s.tracking === 'Live') return false;
+      return true;
+    };
+    function draw() {
+      const shown = list.filter(matches);
+      const groups = sites.map((site) => ({ site, rows: shown.filter((x) => x.site_id === site.id) })).filter((g) => g.rows.length);
+      body.replaceChildren(...(groups.length ? groups.map((g) => h('section', { class: 'sysx-group' },
+        h('div', { class: 'sysx-head' },
+          h('h3', null, h('a', { href: '#sites/' + g.site.id }, g.site.name)),
+          g.site.site_type ? h('span', { class: 'chip' }, g.site.site_type) : null,
+          h('span', { class: 'muted' }, capText(capSum(g.rows.filter((x) => x.tracking !== 'Retired'))))),
+        h('div', { class: 'panel sysx-list' }, g.rows.map(row)))) : [h('p', { class: 'empty' }, 'No systems match.')]));
+    }
+    const search = input('sx-q', sysFilter.q, { type: 'search', placeholder: 'Search by ID, name or site' });
+    search.addEventListener('input', () => { sysFilter.q = search.value; draw(); });
+    const type = select('sx-type', sysFilter.type, [['', 'All types'], ...[...new Set(list.map((x) => x.type).filter(Boolean))].map((t) => [t, t])]);
+    type.addEventListener('change', () => { sysFilter.type = type.value; draw(); });
+    const status = select('sx-status', sysFilter.status, [['', 'Any status'], ['attention', 'Needs attention'], ['live', 'Tracked live'], ['notlive', 'Not tracked yet']]);
+    status.addEventListener('change', () => { sysFilter.status = status.value; draw(); });
+    draw();
+    main.replaceChildren(
+      pageHead('Systems', `Grouped by site. Click a system to edit it. Panel ÷ inverter above ${RATIO_HIGH}× is marked amber.`,
+        canWrite() ? h('button', { class: 'btn primary', onclick: () => editSystem(null) }, 'Add a system') : null),
+      h('div', { class: 'filters sx-filters' }, field('Search', search), field('Type', type), field('Status', status)),
+      body);
   }
 
   // rows of {size, count} with "Add another" — used for inverters, panels and batteries

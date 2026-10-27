@@ -234,3 +234,34 @@ h2.grp-title { margin: 22px 0 10px; }
 .sc-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .sc-actions { display: flex; gap: 14px; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--line); }
 .link.small { font-size: .82rem; }
+
+/* systems page */
+.sx-filters .field:first-child { width: min(100%, 320px); }
+.sysx-group { margin-top: 28px; }
+.sysx-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.sysx-head h3 { font-size: 1.1rem; margin: 0; }
+.sysx-head h3 a { color: inherit; text-decoration: none; }
+.sysx-head h3 a:hover { text-decoration: underline; }
+.sysx-head .muted { font-size: .85rem; }
+.panel.sysx-list { padding: 0 6px; }
+.sysx { display: grid; grid-template-columns: minmax(200px, 1.3fr) minmax(0, 2.4fr) 90px 170px; gap: 16px; align-items: center; padding: 12px 12px; border-top: 1px solid var(--line); cursor: pointer; border-radius: 6px; }
+.sysx:first-child { border-top: 0; }
+.sysx:hover, .sysx:focus-visible { background: var(--bg); outline: none; }
+.sysx.dim .sysx-name strong, .sysx.dim .stat-v { color: var(--muted); }
+.sysx-name > div:first-child { display: flex; align-items: baseline; gap: 8px; }
+.sysx-name .muted { font-size: .84rem; margin-top: 2px; }
+.sysx-id { font: 600 .78rem var(--body); color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+.sysx-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.stat { display: grid; }
+.stat-v { font: 600 .98rem var(--body); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat-l { font-size: .74rem; color: var(--muted); }
+.stat.warn .stat-v { color: var(--warn); }
+.stat.warn .stat-v::after { content: ' ▲'; font-size: .7rem; }
+.sysx-exp { display: grid; text-align: right; }
+.sysx-chip { justify-self: end; text-align: right; }
+.sysx-chip .chip { white-space: normal; text-align: center; }
+@media (max-width: 900px) {
+  .sysx { grid-template-columns: minmax(0, 1fr) auto; }
+  .sysx-stats { grid-column: 1 / -1; grid-row: 2; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sysx-exp { display: none; }
+}
