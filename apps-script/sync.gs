@@ -12,6 +12,9 @@
  *   syncNow            - sends the last 14 days now
  *   syncAll            - sends everything in the tabs (first run, or after fixing old rows)
  *   syncInstallTrigger - sends readings nightly at about 01:30 and the logger heartbeat hourly
+ *   syncEbLines        - refreshes the EB lines tab from the app (also runs with every sync)
+ *
+ * EB import rows carry a line code (E01, E02 … from the EB lines tab) in the Line code column.
  */
 
 var APP_URL = 'https://tmvrfhirwijczjgmydlx.supabase.co';
@@ -45,9 +48,10 @@ function syncRows_(tabName, cols, sinceIso) {
   values.forEach(function (r) {
     var d = r[idx['Date']];
     var iso = d instanceof Date ? Utilities.formatDate(d, tz, 'yyyy-MM-dd') : String(d).slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || !r[idx['System ID']]) return;
+    var idCol = idx['System ID'] !== undefined ? idx['System ID'] : idx['Line code'];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || idCol === undefined || !r[idCol]) return;
     if (sinceIso && iso < sinceIso) return;
-    var o = { date: iso, system_id: String(r[idx['System ID']]).trim() };
+    var o = { date: iso, system_id: String(r[idCol]).trim() };
     Object.keys(cols).forEach(function (k) {
       var i = idx[cols[k]];
       var v = i === undefined ? '' : r[i];
@@ -73,8 +77,31 @@ function syncHeartbeat_() {
   return hb.last_at ? hb : (hb.solaros_token_expiry ? { solaros_token_expiry: hb.solaros_token_expiry } : null);
 }
 
+/** Copies the app's EB lines (codes, tracking) into the sheet's EB lines tab. The app is the master list. */
+function syncEbLines() {
+  var key = PropertiesService.getScriptProperties().getProperty('SOLAR_APP_KEY');
+  var res = UrlFetchApp.fetch(APP_URL + '/rest/v1/rpc/solar_eb_lines', {
+    method: 'post', contentType: 'application/json',
+    headers: { apikey: APP_PUBLIC_KEY, Authorization: 'Bearer ' + APP_PUBLIC_KEY },
+    payload: JSON.stringify({ p_key: key }), muteHttpExceptions: true
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Web app said ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300));
+  var lines = JSON.parse(res.getContentText());
+  lines.sort(function (a, b) { return a.code < b.code ? -1 : 1; });
+  var head = ['Line code', 'Site', 'EB connection', 'Service number', 'Tariff', 'Phase', 'Sanctioned kW', 'Tracking', 'Tracked via', 'Meter or device ID'];
+  var rows = [head].concat(lines.map(function (l) {
+    return [l.code, l.site, l.label, l.service_no || '', l.tariff || '', l.phase || '', l.sanctioned_kw == null ? '' : l.sanctioned_kw, l.tracking, l.tracked_via, l.device || ''];
+  }));
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName('EB lines') || ss.insertSheet('EB lines');
+  sh.getRange(1, 1, Math.max(sh.getMaxRows(), rows.length), head.length).clearContent();
+  sh.getRange(1, 1, rows.length, head.length).setNumberFormat('@').setValues(rows);
+  sh.setFrozenRows(1);
+}
+
 function sync_(sinceIso) {
   var gen = syncRows_('Generation', { kwh: 'kWh', source: 'Source', note: 'Note', load_kwh: 'Load kWh', from_grid_kwh: 'From grid kWh' }, sinceIso);
+  try { syncEbLines(); } catch (e) { Logger.log('EB lines: ' + e.message); }
   var eb = syncRows_('EB import', { daylight_kwh: 'Daylight import kWh', day_kwh: 'Day import kWh', source: 'Source', note: 'Note' }, sinceIso);
   var r = syncCall_(gen, eb, syncHeartbeat_());
   Logger.log('Sent %s generation rows and %s grid import rows; %s skipped (system not in the app).', r.generation, r.eb, r.skipped);
