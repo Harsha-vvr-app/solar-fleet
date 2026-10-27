@@ -117,12 +117,14 @@
 
   /* ---------- overview ---------- */
   async function overview() {
-    const [status, gen, open, notLive, waitingBills] = await Promise.all([
+    const [status, gen, open, notLive, waitingBills, cov] = await Promise.all([
       q(sb.from('solar_system_status').select('*').eq('tracking', 'Live').neq('type', 'Grid meter').order('sort')),
       q(sb.from('solar_generation').select('date, system_id, kwh, note').gte('date', addDays(today(), -15)).order('date')),
       q(sb.from('solar_tickets').select('*').neq('status', 'Closed')),
       q(sb.from('solar_systems').select('id, tracking, type').not('tracking', 'in', '("Live","Retired")')),
       q(sb.from('solar_eb_bills').select('*').eq('status', 'Submitted').order('uploaded_at')),
+      Promise.all([q(sb.from('solar_systems').select('tracking, type')), q(sb.from('solar_eb_connections').select('tracking')), q(sb.from('solar_sites').select('id')),
+        q(sb.from('solar_eb_connections').select('site_id'))]),
     ]);
     const withExp = status.filter((s) => s.expected_kwh != null);
     const ids = withExp.map((s) => s.id);
@@ -173,6 +175,19 @@
       h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, waitingBills.map((b) => h('li', null,
         h('button', { class: 'link', onclick: () => billDetail(b) }, b.site),
         h('span', { class: 'muted' }, ` · ${b.period_to ? 'period to ' + fmtDate(b.period_to) : fmtDate(b.bill_date)} · ${n0(b.billed_kwh ?? b.import_kwh)} units${b.amount != null ? ' · ₹' + d3.format(',.0f')(b.amount) : ''} · from ${b.uploaded_by_name || 'admin'}`)))))) : null;
+    const [cSys, cEb, cSites, cConnSites] = cov;
+    const sysAll = cSys.filter((x) => x.type !== 'Grid meter' && x.tracking !== 'Retired');
+    const ebAll = cEb.filter((x) => x.tracking !== 'Retired');
+    const noConn = cSites.filter((x) => !cConnSites.some((c) => c.site_id === x.id)).length;
+    const meter = (label, n, of, href) => h('a', { class: 'cov', href },
+      h('div', { class: 'cov-top' }, h('strong', null, `${n} of ${of}`), h('span', { class: 'muted' }, label)),
+      h('div', { class: 'cov-bar' }, h('div', { style: `width:${of ? (n / of) * 100 : 0}%` })));
+    const coverage = h('section', { class: 'panel coverage' },
+      h('h3', null, 'Tracking coverage'),
+      h('div', { class: 'cov-grid' },
+        meter('EB lines tracked', ebAll.filter((x) => x.tracking === 'Live').length, ebAll.length, '#grid'),
+        meter('solar systems tracked', sysAll.filter((x) => x.tracking === 'Live').length, sysAll.length, '#systems')),
+      noConn ? h('p', { class: 'muted' }, h('a', { href: '#sites' }, `${noConn} site${noConn > 1 ? 's have' : ' has'} no EB connection entered`), ', so coverage there is unknown.') : null);
     const t0 = today();
     const taskSec = h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Open tasks'),
         canWrite() ? h('button', { class: 'btn', onclick: async () => newTask((await loadSites()).sites) }, 'New task') : null),
@@ -183,7 +198,7 @@
           h('td', null, t.site || '—'), h('td', null, t.reason), h('td', null, t.assigned_to || '—'),
           h('td', { class: 'row-actions' }, canWrite() ? h('button', { class: 'btn small', onclick: () => closeTicketDialog(t, () => { route(); refreshCounts(); }) }, 'Done') : null))))))
         : h('p', { class: 'empty' }, 'No open tasks. Add one from here or from a site card.')));
-    main.replaceChildren(...[head, queue, fleet, taskSec].filter(Boolean),
+    main.replaceChildren(...[head, queue, fleet, coverage, taskSec].filter(Boolean),
       h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Each system against its expected day'),
         h('p', { class: 'muted' }, 'The line marks the expected day. Red when a system made under 60% of it.')),
         h('div', { class: 'panel' }, rows), leftOff));
@@ -552,30 +567,35 @@
 
   /* ---------- daylight grid import ---------- */
   async function grid() {
-    const [rows, sys] = await Promise.all([
+    const [rows, { sites, conns }] = await Promise.all([
       q(sb.from('solar_eb_import').select('*').gte('date', addDays(today(), -45)).order('date')),
-      q(sb.from('solar_systems').select('id, site, system, daylight_target_kwh')),
+      loadSites(),
     ]);
-    const byId = Object.fromEntries(sys.map((s) => [s.id, s]));
-    const ids = [...new Set(rows.map((r) => r.system_id))];
-    const head = pageHead('Daylight grid import', `Units taken from EB between ${state.settings.daylight_start || '06:30'} and ${state.settings.daylight_end || '17:30'}. The aim is close to zero. Set a target per system on the Systems page.`);
-    if (!ids.length) { main.replaceChildren(head, h('p', { class: 'panel empty' }, 'No grid import has been sent from the sheet yet. It appears after the first nightly sync.')); return; }
-    const last = d3.max(rows, (r) => r.date);
+    const siteName = Object.fromEntries(sites.map((x) => [x.id, x.name]));
+    const live = conns.filter((c) => c.tracking === 'Live');
+    const notLive = conns.filter((c) => c.tracking !== 'Live' && c.tracking !== 'Retired');
+    const head = pageHead('Daylight grid import', `Units each EB line takes between ${state.settings.daylight_start || '06:30'} and ${state.settings.daylight_end || '17:30'}. The aim is close to zero. Set a target on each EB connection from the Sites page.`);
+    const last = d3.max(rows, (r) => r.date) || addDays(today(), -1);
     const days = d3.range(13, -1, -1).map((k) => addDays(last, -k));
-    main.replaceChildren(head, h('div', { class: 'cards' }, ids.map((id) => {
-      const s = byId[id] || { site: id };
-      const mine = rows.filter((r) => r.system_id === id);
+    const card = (c) => {
+      const mine = rows.filter((r) => r.eb_connection_id === c.id);
+      const head2 = [h('h3', null, `${siteName[c.site_id] || ''} · ${c.label}`), h('p', { class: 'muted' }, `${c.code} · via ${c.tracked_via}`)];
+      if (!mine.length) return h('div', { class: 'panel' }, ...head2, h('p', { class: 'due-bad' }, 'No readings received yet.'));
       const good = mine.filter((r) => r.daylight_kwh != null && !/^Partial/.test(r.note || '')).map((r) => +r.daylight_kwh);
       const usual = good.length ? d3.median(good) : null;
       const latest = mine[mine.length - 1];
       const chart = h('div', { class: 'chart' });
-      requestAnimationFrame(() => importChart(chart, mine, days, s.daylight_target_kwh));
-      return h('div', { class: 'panel' },
-        h('h3', null, s.site), h('p', { class: 'muted' }, s.system || ''),
+      requestAnimationFrame(() => importChart(chart, mine, days, c.daylight_target_kwh));
+      return h('div', { class: 'panel' }, ...head2,
         h('div', { class: 'card-fig' }, h('span', { class: 'v' }, n1(latest.daylight_kwh)), h('span', { class: 'muted' }, 'units in daylight on ' + fmtDay(latest.date))),
-        h('p', { class: 'muted num' }, `Usual ${n1(usual)} · target ${s.daylight_target_kwh == null ? 'not set' : n1(s.daylight_target_kwh)} · whole day ${n1(latest.day_kwh)}`),
+        h('p', { class: 'muted num' }, `Usual ${n1(usual)} · target ${c.daylight_target_kwh == null ? 'not set' : n1(c.daylight_target_kwh)} · whole day ${n1(latest.day_kwh)}`),
         chart);
-    })));
+    };
+    main.replaceChildren(...[head,
+      live.length ? h('div', { class: 'cards' }, live.map(card)) : h('p', { class: 'panel empty' }, 'No EB line is set to Live tracking yet.'),
+      notLive.length ? h('section', null, h('h2', null, `Not tracked yet · ${notLive.length}`),
+        h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, notLive.map((c) => h('li', null,
+          h('a', { href: '#sites/' + c.site_id }, `${siteName[c.site_id] || c.site_id} · ${c.label}`), h('span', { class: 'muted' }, ` · ${c.code} · ${c.tracked_via}`)))))) : null].filter(Boolean));
   }
 
   function importChart(box, mine, days, target) {
@@ -657,10 +677,11 @@
           w ? h('button', { class: 'link small', onclick: () => editSite(site, sites) }, 'Edit') : null),
         site.address ? h('p', { class: 'muted sc-addr' }, site.address) : null,
         cap ? h('p', { class: 'site-cap' }, cap) : null,
-        line('EB', ebs.length ? h('span', null, ebs.flatMap((c, i) => [i ? ', ' : '', w ? h('button', { class: 'link', onclick: () => editConn(c, site) }, c.label) : c.label,
-          c.service_no ? h('span', { class: 'muted' }, ' ' + c.service_no) : null])) : h('span', { class: 'muted' }, 'none')),
+        line('EB', ebs.length ? h('span', null, ebs.flatMap((c, i) => [i ? h('br') : '', h('span', { class: 'dot ' + (c.tracking === 'Live' ? 'on' : c.tracking === 'Retired' ? 'off' : 'wait'), title: c.tracking === 'Live' ? 'Tracked' : c.tracking }),
+          w ? h('button', { class: 'link', onclick: () => editConn(c, site) }, c.label) : c.label,
+          h('span', { class: 'muted' }, ` ${c.code}${c.tracking === 'Live' ? '' : ' · not tracked'}`)])) : h('span', { class: 'due-bad' }, 'none entered')),
         line('Solar', mine.length ? h('span', null, mine.flatMap((x, i) => [i ? ', ' : '', h('button', { class: 'link', onclick: () => editSystem(x) }, x.id),
-          h('span', { class: 'muted' }, ' ' + (x.system || x.type || '') + (x.tracking !== 'Live' ? ` (${x.tracking.toLowerCase()})` : ''))])) : h('span', { class: 'muted' }, 'none')),
+          h('span', { class: 'muted' }, ' ' + (x.system || x.type || '') + (x.tracking !== 'Live' ? ` · ${x.tracking === 'Pending' ? 'not tracked' : x.tracking.toLowerCase()}` : ''))])) : h('span', { class: 'muted' }, 'none')),
         (() => { const mt = openTasks.filter((t) => t.site_id === site.id); return mt.length ? line('Tasks', h('span', null, mt.flatMap((t, i) => [i ? h('br') : '',
           h('a', { href: '#ticket/' + t.id, class: t.due < t0 ? 'due-bad' : null }, t.reason), h('span', { class: t.due < t0 ? 'due-bad' : 'muted' }, ' · ' + (t.due ? fmtDay(t.due) : 'no date'))]))) : null; })(),
         site.extra_items ? line('Extra', h('span', { class: 'sc-clamp', title: site.extra_items }, site.extra_items)) : null,
@@ -702,8 +723,13 @@
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save site'))));
   }
 
-  function editConn(c, site) {
+  async function editConn(c, site) {
     const isNew = !c;
+    const methods = (await q(sb.from('solar_tracking_methods').select('name').order('sort'))).map((m) => m.name);
+    const tracking = select('eb-tracking', c ? c.tracking : 'Pending', ['Live', 'Pending', 'Not installed', 'Retired']);
+    const via = select('eb-via', c ? c.tracked_via : 'Not tracked yet', methods);
+    const device = input('eb-device', c && c.source_id, { placeholder: 'Meter or device ID' });
+    const target = input('eb-target', c && c.daylight_target_kwh, { type: 'number', step: 'any', min: 0 });
     const label = input('eb-label', c ? c.label : site.name, { required: true });
     const service = input('eb-service', c && c.service_no);
     const tariff = input('eb-tariff', c && c.tariff, { placeholder: 'e.g. LT IA, LT CT' });
@@ -715,14 +741,19 @@
     openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
       e.preventDefault();
       const row = { label: label.value.trim(), service_no: service.value.trim() || null, tariff: tariff.value.trim() || null, phase: phase.value || null,
-        sanctioned_kw: num(kw), ct_multiplier: num(ct), notes: notes.value.trim() || null };
+        sanctioned_kw: num(kw), ct_multiplier: num(ct), notes: notes.value.trim() || null,
+        tracking: tracking.value, tracked_via: via.value, source_id: device.value.trim() || null, daylight_target_kwh: num(target) };
       if (isNew) await q(sb.from('solar_eb_connections').insert({ site_id: site.id, ...row }));
       else await q(sb.from('solar_eb_connections').update(row).eq('id', c.id));
       closeDialog(); toast('EB connection saved'); route();
     } },
-      h('div', { class: 'dlg-head' }, h('h2', null, (isNew ? 'Add an EB connection · ' : '') + site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('div', { class: 'dlg-head' }, h('h2', null, (isNew ? 'Add an EB connection · ' : `${c.code} · `) + site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
       h('div', { class: 'form-grid' }, field('Name', label), field('Service number', service), field('Tariff', tariff), field('Phase', phase),
-        field('Sanctioned load (kW)', kw), field('Meter CT multiplier', ct), field('Notes', notes, 'wide')),
+        field('Sanctioned load (kW)', kw), field('Meter CT multiplier', ct)),
+      h('fieldset', { class: 'spec-set' }, h('legend', null, 'Tracking'),
+        h('p', { class: 'muted' }, isNew ? 'A code like E14 is given when you save. The meter logger sends readings under that code.' : `Readings for this line are sent under the code ${c.code}.`),
+        h('div', { class: 'form-grid' }, field('Tracking', tracking), field('Tracked via', via), field('Meter or device ID', device), field('Daylight import target (units/day)', target))),
+      h('div', { class: 'form-grid' }, field('Notes', notes, 'wide')),
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
   }
 
@@ -864,7 +895,7 @@
       h('div', { class: 'form-grid' },
         field('Site', site), field('ID', id), field('System name', system), field('Type', type),
         field('Rated kW', kw), field('EB connection', conn), field('Tracking', tracking), field('Tracked via', via),
-        field('Device or station ID', source), field('Daylight grid import target (kWh)', target)),
+        field('Device or station ID', source)),
       h('fieldset', { class: 'spec-set' }, h('legend', null, 'Inverters'), inv),
       h('fieldset', { class: 'spec-set' }, h('legend', null, 'Panels'), pan, kwp),
       h('fieldset', { class: 'spec-set' }, h('legend', null, 'Batteries'), bat),
@@ -939,7 +970,7 @@
   /* ---------- bulk upload from Excel ---------- */
   const BULK_SHEETS = {
     'Sites': ['Site ID', 'Site name', 'Type of site', 'Address', 'Extra items', 'Notes'],
-    'EB connections': ['Site name', 'Connection name', 'Service number', 'Tariff', 'Phase', 'Sanctioned kW', 'CT multiplier', 'Notes'],
+    'EB connections': ['Site name', 'Connection name', 'Service number', 'Tariff', 'Phase', 'Sanctioned kW', 'CT multiplier', 'Tracking', 'Tracked via', 'Device ID', 'Daylight target kWh', 'Notes'],
     'Systems': ['System ID', 'Site name', 'System name', 'Type', 'Rated kW', 'Tracking', 'Tracked via', 'Device ID', 'EB connection',
       'Inverter kW each', 'Inverters', 'Panel watts each', 'Panels', 'Battery Ah', 'Battery volts', 'Batteries', 'Battery type', 'Daylight target kWh', 'Notes'],
     'Tasks': ['Site name', 'Task', 'Details', 'Due date', 'Assigned to'],
@@ -953,6 +984,7 @@
     [''],
     ['Sites', 'Leave Site ID blank for a new site. A row whose Site ID or Site name matches an existing site updates that site.'],
     ['EB connections', 'Site name must match a site in the app or on the Sites tab. A connection with the same name at the same site is updated.'],
+    ['', 'Set Tracking to Live once its smart meter is sending readings. New connections get a code like E14, shown in the app.'],
     ['Systems', 'Leave System ID blank for a new system (an ID like S22 is given). Type: ' + SYS_TYPES.join(', ') + '. Tracking: ' + TRACKING.join(', ') + '.'],
     ['', 'A system with two kinds of panel, inverter or battery: add a second row with the same System ID and fill only those columns.'],
     ['', 'EB connection is the connection name at that site. Battery volts: 12 for a lead-acid battery, 51.2 for a 51.2 V lithium pack.'],
@@ -987,7 +1019,7 @@
     const siteName = (id) => (cur && cur.sites.find((x) => x.id === id) || {}).name || '';
     add('Sites', [BULK_SHEETS.Sites, ...(cur ? cur.sites.map((x) => [x.id, x.name, x.site_type || '', x.address || '', x.extra_items || '', x.notes || '']) : [])], [18, 30, 16, 30, 40, 40]);
     add('EB connections', [BULK_SHEETS['EB connections'], ...(cur ? cur.conns.map((c) => [siteName(c.site_id), c.label, c.service_no || '', c.tariff || '', c.phase || '',
-      c.sanctioned_kw ?? '', c.ct_multiplier ?? '', c.notes || '']) : [])], [30, 28, 18, 12, 14, 14, 14, 30]);
+      c.sanctioned_kw ?? '', c.ct_multiplier ?? '', c.tracking, c.tracked_via, c.source_id || '', c.daylight_target_kwh ?? '', c.notes || '']) : [])], [30, 28, 18, 12, 14, 14, 14, 13, 20, 18, 12, 30]);
     const sysRows = [];
     if (cur) cur.systems.forEach((s) => {
       const inv = s.inverter_spec || [], pan = s.panel_spec || [], bat = s.battery_spec || [];
@@ -1027,7 +1059,8 @@
     if (!known.length) errors.push('None of the tabs Sites, EB connections, Systems or Tasks were found. Use the template from this page.');
     known.forEach((n) => {
       const head = (XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1 })[0] || []).map((x) => String(x).trim());
-      const missing = BULK_SHEETS[n].filter((k) => !head.includes(k));
+      const optional = ['Tracking', 'Tracked via', 'Device ID', 'Daylight target kWh'];
+      const missing = BULK_SHEETS[n].filter((k) => !head.includes(k) && !(n === 'EB connections' && optional.includes(k)));
       if (missing.length) errors.push(`${n} tab: missing heading${missing.length > 1 ? 's' : ''} ${missing.join(', ')}.`);
     });
 
@@ -1075,7 +1108,11 @@
       let phase = str(r['Phase']);
       if (phase) { phase = /^s|1/i.test(phase) ? 'Single phase' : /^t|3/i.test(phase) ? 'Three phase' : (errors.push(`${where}: Phase should be Single phase or Three phase.`), null); }
       const fields = { label, service_no: str(r['Service number']), tariff: str(r['Tariff']), phase,
-        sanctioned_kw: num(r['Sanctioned kW'], where), ct_multiplier: num(r['CT multiplier'], where), notes: str(r['Notes']) };
+        sanctioned_kw: num(r['Sanctioned kW'], where), ct_multiplier: num(r['CT multiplier'], where), notes: str(r['Notes']),
+        source_id: str(r['Device ID']), daylight_target_kwh: num(r['Daylight target kWh'], where) };
+      const tr = str(r['Tracking']), tv = str(r['Tracked via']);
+      if (tr) { const ok = TRACKING.find((t) => low(t) === low(tr)); if (ok) fields.tracking = ok; else errors.push(`${where}: Tracking should be one of ${TRACKING.join(', ')}.`); }
+      if (tv) { const ok = cur.methods.find((m) => low(m) === low(tv)); if (ok) fields.tracked_via = ok; else errors.push(`${where}: Tracked via should be one of ${cur.methods.join(', ')}.`); }
       const ex = conns.get(connKey(site.id, label));
       if (ex && ex.id) {
         const upd = Object.fromEntries(Object.entries(fields).filter(([k, v]) => v != null && String(v) !== String(ex[k] ?? '')));

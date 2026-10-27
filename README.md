@@ -10,3 +10,7 @@ A small web app for Harsha's solar systems: daily output against each system's e
 The publishable key in `config.js` is meant to be public. The sheet's sync key is not in this repository.
 
 Libraries in `vendor/` are kept as files so the page doesn't depend on a CDN: supabase-js 2.45.4 (MIT) and d3 7.9.0 (ISC).
+
+## EB lines
+
+Every EB connection has a code (E01, E02, …) shown on the Sites page. A line's smart meter logger writes daily rows to the sheet's **EB import** tab with that code in the `System ID` column (`Daylight import kWh`, `Day import kWh`). The nightly sync sends them to the app. Set the connection's Tracking to **Live** once readings arrive; the nightly checks then raise a ticket if the meter stops reporting or daylight import runs above usual or above the line's target. The office logger's rows under `S30` are mapped to its connection automatically.
