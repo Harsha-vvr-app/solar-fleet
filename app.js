@@ -102,7 +102,7 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk };
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
@@ -934,6 +934,327 @@
       h('section', { class: 'panel' }, h('div', { class: 'table-wrap' }, h('table', null,
         h('thead', null, h('tr', null, ['Name', 'Username', 'Role'].map((c) => h('th', null, c)))),
         h('tbody', null, list.map((u) => h('tr', null, h('td', null, u.name), h('td', null, u.login), h('td', null, u.role))))))));
+  }
+
+  /* ---------- bulk upload from Excel ---------- */
+  const BULK_SHEETS = {
+    'Sites': ['Site ID', 'Site name', 'Type of site', 'Address', 'Extra items', 'Notes'],
+    'EB connections': ['Site name', 'Connection name', 'Service number', 'Tariff', 'Phase', 'Sanctioned kW', 'CT multiplier', 'Notes'],
+    'Systems': ['System ID', 'Site name', 'System name', 'Type', 'Rated kW', 'Tracking', 'Tracked via', 'Device ID', 'EB connection',
+      'Inverter kW each', 'Inverters', 'Panel watts each', 'Panels', 'Battery Ah', 'Battery volts', 'Batteries', 'Battery type', 'Daylight target kWh', 'Notes'],
+    'Tasks': ['Site name', 'Task', 'Details', 'Due date', 'Assigned to'],
+  };
+  const SYS_TYPES = ['On-grid', 'Hybrid', 'Off-grid', 'Grid meter'];
+  const TRACKING = ['Live', 'Pending', 'Not installed', 'Retired'];
+  const BULK_HELP = [
+    ['How to use this file'],
+    ['Fill in only the tabs you need. Empty tabs are ignored. Keep the headings in row 1 exactly as they are.'],
+    ['Upload it on the Bulk upload page. You will see what will be added or changed before anything is saved.'],
+    [''],
+    ['Sites', 'Leave Site ID blank for a new site. A row whose Site ID or Site name matches an existing site updates that site.'],
+    ['EB connections', 'Site name must match a site in the app or on the Sites tab. A connection with the same name at the same site is updated.'],
+    ['Systems', 'Leave System ID blank for a new system (an ID like S22 is given). Type: ' + SYS_TYPES.join(', ') + '. Tracking: ' + TRACKING.join(', ') + '.'],
+    ['', 'A system with two kinds of panel, inverter or battery: add a second row with the same System ID and fill only those columns.'],
+    ['', 'EB connection is the connection name at that site. Battery volts: 12 for a lead-acid battery, 51.2 for a 51.2 V lithium pack.'],
+    ['Tasks', 'Every row becomes a new open task. Due date is required (for example 15/11/2026). The same task, site and date is not added twice.'],
+    [''],
+    ['Blank cells', 'When updating, a blank cell leaves the current value as it is. To clear a value, edit it in the app.'],
+  ];
+
+  async function loadXlsx() {
+    if (window.XLSX) return;
+    await new Promise((res, rej) => {
+      const s = document.createElement('script'); s.src = 'vendor/xlsx-0.18.5.full.min.js';
+      s.onload = res; s.onerror = () => rej(new Error('Could not load the Excel reader. Check your connection and try again.'));
+      document.head.append(s);
+    });
+  }
+
+  async function bulkCurrent() {
+    const [{ sites, conns }, systemsList, methods] = await Promise.all([loadSites(),
+      q(sb.from('solar_systems').select('*').order('sort')), q(sb.from('solar_tracking_methods').select('name').order('sort'))]);
+    return { sites, conns, systems: systemsList, methods: methods.map((m) => m.name) };
+  }
+
+  function bulkWorkbook(cur) {
+    const wb = XLSX.utils.book_new();
+    const add = (name, rows, widths) => {
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws['!cols'] = widths.map((w) => ({ wch: w }));
+      XLSX.utils.book_append_sheet(wb, ws, name);
+    };
+    add('How to use', BULK_HELP, [16, 120]);
+    const siteName = (id) => (cur && cur.sites.find((x) => x.id === id) || {}).name || '';
+    add('Sites', [BULK_SHEETS.Sites, ...(cur ? cur.sites.map((x) => [x.id, x.name, x.site_type || '', x.address || '', x.extra_items || '', x.notes || '']) : [])], [18, 30, 16, 30, 40, 40]);
+    add('EB connections', [BULK_SHEETS['EB connections'], ...(cur ? cur.conns.map((c) => [siteName(c.site_id), c.label, c.service_no || '', c.tariff || '', c.phase || '',
+      c.sanctioned_kw ?? '', c.ct_multiplier ?? '', c.notes || '']) : [])], [30, 28, 18, 12, 14, 14, 14, 30]);
+    const sysRows = [];
+    if (cur) cur.systems.forEach((s) => {
+      const inv = s.inverter_spec || [], pan = s.panel_spec || [], bat = s.battery_spec || [];
+      const n = Math.max(1, inv.length, pan.length, bat.length);
+      const conn = cur.conns.find((c) => c.id === s.eb_connection_id);
+      for (let i = 0; i < n; i++) {
+        const iv = inv[i] || {}, pv = pan[i] || {}, bv = bat[i] || {};
+        sysRows.push(i === 0
+          ? [s.id, siteName(s.site_id), s.system || '', s.type || '', s.rated_kw ?? '', s.tracking, s.tracked_via || '', s.source_id || '', conn ? conn.label : '',
+            iv.kw ?? '', iv.count ?? '', pv.watt ?? '', pv.count ?? '', bv.ah ?? '', bv.volt ?? '', bv.count ?? '', bv.type || '', s.daylight_target_kwh ?? '', s.notes || '']
+          : [s.id, '', '', '', '', '', '', '', '', iv.kw ?? '', iv.count ?? '', pv.watt ?? '', pv.count ?? '', bv.ah ?? '', bv.volt ?? '', bv.count ?? '', bv.type || '', '', '']);
+      }
+    });
+    add('Systems', [BULK_SHEETS.Systems, ...sysRows], [10, 28, 24, 11, 9, 13, 20, 18, 22, 10, 9, 10, 8, 9, 9, 9, 15, 12, 30]);
+    add('Tasks', [BULK_SHEETS.Tasks], [30, 40, 40, 14, 18]);
+    return wb;
+  }
+
+  // Build a plan from the uploaded file without saving anything.
+  function bulkPlan(wb, cur) {
+    const errors = [], plan = { sites: [], conns: [], systems: [], tasks: [] };
+    const low = (v) => String(v ?? '').trim().toLowerCase();
+    const str = (v) => { const s = String(v ?? '').trim(); return s === '' ? null : s; };
+    const num = (v, where) => {
+      if (v === '' || v == null) return null;
+      const n = typeof v === 'number' ? v : +String(v).replace(/,/g, '').trim();
+      if (!isFinite(n)) { errors.push(`${where}: "${v}" is not a number.`); return null; }
+      return n;
+    };
+    const rowsOf = (name) => {
+      const ws = wb.Sheets[name]; if (!ws) return [];
+      return XLSX.utils.sheet_to_json(ws, { defval: '', raw: true })
+        .map((r, i) => { const o = { _row: i + 2 }; Object.keys(r).forEach((k) => { o[k.trim()] = typeof r[k] === 'string' ? r[k].trim() : r[k]; }); return o; })
+        .filter((r) => BULK_SHEETS[name].some((k) => r[k] !== '' && r[k] != null));
+    };
+    const known = Object.keys(BULK_SHEETS).filter((n) => wb.Sheets[n]);
+    if (!known.length) errors.push('None of the tabs Sites, EB connections, Systems or Tasks were found. Use the template from this page.');
+    known.forEach((n) => {
+      const head = (XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1 })[0] || []).map((x) => String(x).trim());
+      const missing = BULK_SHEETS[n].filter((k) => !head.includes(k));
+      if (missing.length) errors.push(`${n} tab: missing heading${missing.length > 1 ? 's' : ''} ${missing.join(', ')}.`);
+    });
+
+    // sites: name -> id, including new ones from this file
+    const siteByName = new Map(cur.sites.map((x) => [low(x.name), x]));
+    const siteIds = new Set(cur.sites.map((x) => x.id));
+    let sort = d3.max(cur.sites, (x) => x.sort) || 0;
+    rowsOf('Sites').forEach((r) => {
+      const where = `Sites row ${r._row}`;
+      const name = str(r['Site name']);
+      if (!name) { errors.push(`${where}: Site name is empty.`); return; }
+      let existing = r['Site ID'] ? cur.sites.find((x) => low(x.id) === low(r['Site ID'])) : null;
+      if (r['Site ID'] && !existing) { errors.push(`${where}: Site ID "${r['Site ID']}" is not in the app. Leave it blank for a new site.`); return; }
+      existing = existing || siteByName.get(low(name));
+      const clash = siteByName.get(low(name));
+      if (clash && existing && clash.id !== existing.id) { errors.push(`${where}: another site is already called "${name}".`); return; }
+      const fields = { name, site_type: str(r['Type of site']), address: str(r['Address']), extra_items: str(r['Extra items']), notes: str(r['Notes']) };
+      if (existing) {
+        const upd = Object.fromEntries(Object.entries(fields).filter(([k, v]) => v != null && v !== existing[k]));
+        plan.sites.push({ kind: Object.keys(upd).length ? 'update' : 'same', id: existing.id, row: upd, label: name });
+        siteByName.set(low(name), { ...existing, name });
+      } else {
+        const id = nextSiteId(name, [...siteIds].map((x) => ({ id: x })));
+        siteIds.add(id);
+        const row = { id, sort: ++sort, ...fields };
+        plan.sites.push({ kind: 'new', id, row, label: name });
+        siteByName.set(low(name), row);
+      }
+    });
+    const findSite = (v, where) => {
+      if (!str(v)) { errors.push(`${where}: Site name is empty.`); return null; }
+      const s = siteByName.get(low(v));
+      if (!s) errors.push(`${where}: no site called "${v}". Add it on the Sites tab or check the spelling.`);
+      return s || null;
+    };
+
+    // EB connections, keyed by site id + name
+    const connKey = (siteId, label) => siteId + '|' + low(label);
+    const conns = new Map(cur.conns.map((c) => [connKey(c.site_id, c.label), c]));
+    rowsOf('EB connections').forEach((r) => {
+      const where = `EB connections row ${r._row}`;
+      const site = findSite(r['Site name'], where); if (!site) return;
+      const label = str(r['Connection name']);
+      if (!label) { errors.push(`${where}: Connection name is empty.`); return; }
+      let phase = str(r['Phase']);
+      if (phase) { phase = /^s|1/i.test(phase) ? 'Single phase' : /^t|3/i.test(phase) ? 'Three phase' : (errors.push(`${where}: Phase should be Single phase or Three phase.`), null); }
+      const fields = { label, service_no: str(r['Service number']), tariff: str(r['Tariff']), phase,
+        sanctioned_kw: num(r['Sanctioned kW'], where), ct_multiplier: num(r['CT multiplier'], where), notes: str(r['Notes']) };
+      const ex = conns.get(connKey(site.id, label));
+      if (ex && ex.id) {
+        const upd = Object.fromEntries(Object.entries(fields).filter(([k, v]) => v != null && String(v) !== String(ex[k] ?? '')));
+        plan.conns.push({ kind: Object.keys(upd).length ? 'update' : 'same', id: ex.id, row: upd, label: `${site.name} · ${label}` });
+      } else if (ex) {
+        errors.push(`${where}: "${label}" appears twice for ${site.name}.`);
+      } else {
+        plan.conns.push({ kind: 'new', row: { site_id: site.id, ...fields }, label: `${site.name} · ${label}` });
+        conns.set(connKey(site.id, label), { site_id: site.id, label });
+      }
+    });
+
+    // systems: rows grouped by System ID; blank ID = new system
+    const methodBy = new Map(cur.methods.map((m) => [low(m), m]));
+    const usedIds = new Set(cur.systems.map((x) => x.id));
+    const nextSys = () => { let k = 1; while (usedIds.has('S' + String(k).padStart(2, '0'))) k++; const id = 'S' + String(k).padStart(2, '0'); usedIds.add(id); return id; };
+    const groups = [];
+    rowsOf('Systems').forEach((r) => {
+      const id = str(r['System ID']) && String(r['System ID']).trim().toUpperCase();
+      const g = id && groups.find((x) => x.id === id);
+      if (g) g.rows.push(r); else groups.push({ id, rows: [r] });
+    });
+    groups.forEach((g) => {
+      const r = g.rows[0], where = `Systems row ${r._row}`;
+      const existing = g.id ? cur.systems.find((x) => x.id === g.id) : null;
+      const siteCell = str(r['Site name']);
+      const site = siteCell ? findSite(siteCell, where) : existing ? cur.sites.find((x) => x.id === existing.site_id) : findSite('', where);
+      if (!site) return;
+      const type = str(r['Type']);
+      const typeOk = type ? SYS_TYPES.find((t) => low(t) === low(type)) : null;
+      if (type && !typeOk) errors.push(`${where}: Type should be one of ${SYS_TYPES.join(', ')}.`);
+      const tracking = str(r['Tracking']);
+      const trackOk = tracking ? TRACKING.find((t) => low(t) === low(tracking)) : null;
+      if (tracking && !trackOk) errors.push(`${where}: Tracking should be one of ${TRACKING.join(', ')}.`);
+      const via = str(r['Tracked via']);
+      const viaOk = via ? methodBy.get(low(via)) : null;
+      if (via && !viaOk) errors.push(`${where}: Tracked via should be one of ${cur.methods.join(', ')}.`);
+      let connId;
+      const connName = str(r['EB connection']);
+      if (connName) {
+        const c = conns.get(connKey(site.id, connName));
+        if (!c) errors.push(`${where}: no EB connection called "${connName}" at ${site.name}.`);
+        else connId = { site_id: site.id, label: c.label };
+      }
+      const spec = { inv: [], pan: [], bat: [] };
+      g.rows.forEach((x) => {
+        const w = `Systems row ${x._row}`;
+        const ik = num(x['Inverter kW each'], w), ic = num(x['Inverters'], w);
+        if (ik != null || ic != null) spec.inv.push({ kw: ik, count: ic ?? 1 });
+        const pw = num(x['Panel watts each'], w), pc = num(x['Panels'], w);
+        if (pw != null || pc != null) spec.pan.push({ watt: pw, count: pc });
+        const ba = num(x['Battery Ah'], w), bv = num(x['Battery volts'], w), bc = num(x['Batteries'], w), bt = str(x['Battery type']);
+        if (ba != null || bc != null || bv != null) spec.bat.push({ ah: ba, volt: bv ?? (bt && /51/.test(bt) ? 51.2 : bt && /lead/i.test(bt) ? 12 : null), count: bc, type: bt || 'Lead-acid' });
+      });
+      const fields = { site_id: site.id, system: str(r['System name']), type: typeOk, rated_kw: num(r['Rated kW'], where), tracking: trackOk, tracked_via: viaOk,
+        source_id: str(r['Device ID']), daylight_target_kwh: num(r['Daylight target kWh'], where), notes: str(r['Notes']) };
+      if (spec.inv.length) fields.inverter_spec = spec.inv;
+      if (spec.pan.length) fields.panel_spec = spec.pan;
+      if (spec.bat.length) fields.battery_spec = spec.bat;
+      if (existing) {
+        const upd = Object.fromEntries(Object.entries(fields).filter(([k, v]) => v != null && JSON.stringify(v) !== JSON.stringify(existing[k] ?? null)));
+        plan.systems.push({ kind: Object.keys(upd).length || connId ? 'update' : 'same', id: existing.id, row: upd, conn: connId, label: `${existing.id} · ${site.name}` });
+      } else {
+        if (g.id && !/^[A-Z0-9-]{1,12}$/.test(g.id)) { errors.push(`${where}: System ID "${g.id}" should be short, like S22.`); return; }
+        const id = g.id || nextSys(); usedIds.add(id);
+        plan.systems.push({ kind: 'new', id, conn: connId, label: `${id} · ${site.name}`,
+          row: { id, sort: usedIds.size, inverter_spec: [], panel_spec: [], battery_spec: [], ...fields, tracking: trackOk || 'Pending', tracked_via: viaOk || 'Not tracked yet', type: typeOk || 'Off-grid' } });
+      }
+    });
+
+    // tasks
+    const toDate = (v) => {
+      if (v instanceof Date) return d3.timeFormat('%Y-%m-%d')(v);
+      if (typeof v === 'number') return d3.utcFormat('%Y-%m-%d')(new Date(Math.round((v - 25569) * 864e5)));
+      const s = String(v).trim();
+      let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+      m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/); if (m) return `${m[3].length === 2 ? '20' + m[3] : m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+      return null;
+    };
+    rowsOf('Tasks').forEach((r) => {
+      const where = `Tasks row ${r._row}`;
+      const site = findSite(r['Site name'], where);
+      const reason = str(r['Task']);
+      if (!reason) errors.push(`${where}: Task is empty.`);
+      const due = r['Due date'] === '' ? null : toDate(r['Due date']);
+      if (!due) errors.push(`${where}: Due date is missing or not a date (use 15/11/2026).`);
+      if (!site || !reason || !due) return;
+      const dup = (cur.tasks || []).some((t) => t.site_id === site.id && low(t.reason) === low(reason) && t.due === due);
+      plan.tasks.push({ kind: dup ? 'same' : 'new', label: `${site.name} · ${reason} · ${fmtDay(due)}`,
+        row: { type: 'Task', site_id: site.id, site: site.name, reason, details: str(r['Details']), due, assigned_to: str(r['Assigned to']) } });
+    });
+    return { plan, errors };
+  }
+
+  async function bulkApply(plan) {
+    const done = { sites: 0, conns: 0, systems: 0, tasks: 0 };
+    const news = (list) => list.filter((x) => x.kind === 'new');
+    const upds = (list) => list.filter((x) => x.kind === 'update');
+    if (news(plan.sites).length) await q(sb.from('solar_sites').insert(news(plan.sites).map((x) => x.row)));
+    for (const x of upds(plan.sites)) await q(sb.from('solar_sites').update(x.row).eq('id', x.id));
+    done.sites = news(plan.sites).length + upds(plan.sites).length;
+    if (news(plan.conns).length) await q(sb.from('solar_eb_connections').insert(news(plan.conns).map((x) => x.row)));
+    for (const x of upds(plan.conns)) await q(sb.from('solar_eb_connections').update(x.row).eq('id', x.id));
+    done.conns = news(plan.conns).length + upds(plan.conns).length;
+    const conns = await q(sb.from('solar_eb_connections').select('id, site_id, label'));
+    const connId = (c) => { if (!c) return undefined; const m = conns.find((x) => x.site_id === c.site_id && x.label.toLowerCase() === c.label.toLowerCase()); return m ? m.id : undefined; };
+    const newSys = news(plan.systems).map((x) => { const id = connId(x.conn); return id ? { ...x.row, eb_connection_id: id } : x.row; });
+    if (newSys.length) await q(sb.from('solar_systems').insert(newSys));
+    for (const x of upds(plan.systems)) { const id = connId(x.conn); await q(sb.from('solar_systems').update(id ? { ...x.row, eb_connection_id: id } : x.row).eq('id', x.id)); }
+    done.systems = newSys.length + upds(plan.systems).length;
+    if (news(plan.tasks).length) await q(sb.from('solar_tickets').insert(news(plan.tasks).map((x) => x.row)));
+    done.tasks = news(plan.tasks).length;
+    return done;
+  }
+
+  async function bulk() {
+    const w = canWrite();
+    const status = h('div');
+    const download = async (withData) => {
+      try {
+        await loadXlsx();
+        const wb = bulkWorkbook(withData ? await bulkCurrent() : null);
+        XLSX.writeFile(wb, withData ? `solar-fleet-${today()}.xlsx` : 'solar-fleet-template.xlsx');
+      } catch (err) { toast(err.message || 'Could not make the file', true); }
+    };
+    const file = input('bk-file', '', { type: 'file', accept: '.xlsx,.xls,.csv' });
+    file.addEventListener('change', async () => {
+      const f = file.files[0]; if (!f) return;
+      status.replaceChildren(h('p', { class: 'muted' }, 'Reading ' + f.name + '…'));
+      try {
+        await loadXlsx();
+        const [wb, cur, tasks] = await Promise.all([f.arrayBuffer().then((b) => XLSX.read(b, { cellDates: true })), bulkCurrent(),
+          q(sb.from('solar_tickets').select('site_id, reason, due').eq('type', 'Task').neq('status', 'Closed'))]);
+        cur.tasks = tasks;
+        const { plan, errors } = bulkPlan(wb, cur);
+        showPlan(f.name, plan, errors);
+      } catch (err) { status.replaceChildren(h('p', { class: 'due-bad' }, err.message || 'Could not read that file.')); }
+    });
+    function showPlan(name, plan, errors) {
+      const parts = [['sites', 'Sites'], ['conns', 'EB connections'], ['systems', 'Systems'], ['tasks', 'Tasks']];
+      const count = (k, kind) => plan[k].filter((x) => x.kind === kind).length;
+      const total = parts.reduce((a, [k]) => a + count(k, 'new') + count(k, 'update'), 0);
+      const go = h('button', { class: 'btn primary', disabled: !!errors.length || !total }, total ? `Save ${total} change${total > 1 ? 's' : ''}` : 'Nothing to change');
+      go.addEventListener('click', async () => {
+        go.disabled = true; go.textContent = 'Saving…';
+        try {
+          const d = await bulkApply(plan);
+          status.replaceChildren(h('div', { class: 'panel' }, h('h3', null, 'Saved'),
+            h('p', null, `${d.sites} sites, ${d.conns} EB connections, ${d.systems} systems and ${d.tasks} tasks were added or updated.`)));
+          file.value = ''; refreshCounts(); toast('Bulk upload saved');
+        } catch (err) { toast(err.message || 'Saving stopped part way. Download the current data to see what was saved.', true); go.disabled = false; go.textContent = 'Try again'; }
+      });
+      const detail = (k) => {
+        const rows = plan[k].filter((x) => x.kind !== 'same');
+        return rows.length ? h('ul', { class: 'plain bulk-list' }, rows.slice(0, 60).map((x) => h('li', null,
+          h('span', { class: 'chip ' + (x.kind === 'new' ? 'ok' : 'amber') }, x.kind === 'new' ? 'New' : 'Update'), ' ', x.label,
+          x.kind === 'update' ? h('span', { class: 'muted' }, ' · ' + Object.keys(x.row).concat(x.conn ? ['EB connection'] : []).map((f) => f.replace(/_/g, ' ').replace(' spec', 's')).join(', ')) : null)),
+          rows.length > 60 ? h('li', { class: 'muted' }, `and ${rows.length - 60} more`) : null) : null;
+      };
+      status.replaceChildren(h('div', { class: 'panel' },
+        h('h3', null, name),
+        h('div', { class: 'table-wrap' }, h('table', null,
+          h('thead', null, h('tr', null, ['', 'New', 'Updated', 'No change'].map((c, i) => h('th', { class: i ? 'n' : null }, c)))),
+          h('tbody', null, parts.map(([k, l]) => h('tr', null, h('td', null, l), h('td', { class: 'n' }, count(k, 'new')), h('td', { class: 'n' }, count(k, 'update')), h('td', { class: 'n' }, count(k, 'same'))))))),
+        errors.length ? h('div', { class: 'bulk-errors' }, h('h3', null, `Fix ${errors.length === 1 ? 'this' : 'these ' + errors.length} in the file, then upload it again`),
+          h('ul', null, errors.slice(0, 50).map((e) => h('li', null, e)))) : null,
+        ...parts.map(([k, l]) => { const d = detail(k); return d ? h('div', null, h('h3', null, l), d) : null; }).filter(Boolean),
+        w ? h('div', { class: 'actions' }, go) : null));
+    }
+    main.replaceChildren(
+      pageHead('Bulk upload', 'Add or update sites, EB connections, systems and tasks from one Excel file. Nothing is saved until you check the summary and press Save.'),
+      h('section', { class: 'panel' },
+        h('h3', null, '1. Get the template'),
+        h('p', { class: 'muted' }, 'The current-data file has everything already in the app, so you can edit it and upload it back. The blank one only has the headings.'),
+        h('div', { class: 'actions left' },
+          h('button', { class: 'btn', onclick: () => download(true) }, 'Download with current data'),
+          h('button', { class: 'btn', onclick: () => download(false) }, 'Download blank template'))),
+      w ? h('section', { class: 'panel' }, h('h3', null, '2. Upload the filled file'), field('Excel file', file)) : h('p', { class: 'muted' }, 'Only the owner and admin can upload.'),
+      status);
   }
 
   boot();
