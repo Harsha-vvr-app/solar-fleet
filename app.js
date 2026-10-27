@@ -603,53 +603,60 @@
     return id;
   };
 
+  const SITE_TYPES = ['Hostel', 'School', 'Office', 'Hotel', 'Residence', 'Shop', 'Construction site'];
   async function sitesPage() {
     const [{ sites, conns }, systemsList] = await Promise.all([loadSites(), q(sb.from('solar_system_status').select('*').order('sort'))]);
-    const cards = sites.map((site) => {
+    const w = canWrite();
+    const card = (site) => {
       const mine = systemsList.filter((x) => x.site_id === site.id);
       const ebs = conns.filter((c) => c.site_id === site.id);
-      return h('section', { class: 'panel site', id: 'site-' + site.id },
-        h('div', { class: 'sec-head' },
-          h('div', null, h('h2', null, site.name), site.address ? h('p', { class: 'muted' }, site.address) : null,
-            mine.length ? h('p', { class: 'site-cap' }, capText(capSum(mine.filter((x) => x.tracking !== 'Retired'))) || 'No capacity recorded') : null),
-          canWrite() ? h('div', { class: 'actions' },
-            h('button', { class: 'btn', onclick: () => editSite(site, sites) }, 'Edit site'),
-            h('button', { class: 'btn', onclick: () => editConn(null, site) }, 'Add EB connection'),
-            h('button', { class: 'btn', onclick: () => editSystem(null, site.id) }, 'Add system')) : null),
-        h('div', { class: 'site-grid' },
-          h('div', null, h('h3', null, 'EB connections'),
-            ebs.length ? h('ul', { class: 'plain' }, ebs.map((c) => h('li', null,
-              canWrite() ? h('button', { class: 'link', onclick: () => editConn(c, site) }, c.label) : c.label,
-              h('span', { class: 'muted' }, [c.service_no && ' · ' + c.service_no, c.tariff && ' · ' + c.tariff, c.sanctioned_kw != null && ` · ${c.sanctioned_kw} kW sanctioned`, c.phase && ' · ' + c.phase].filter(Boolean).join(''))))) : h('p', { class: 'muted' }, 'None added yet.')),
-          h('div', null, h('h3', null, 'Solar systems'),
-            mine.length ? h('ul', { class: 'plain' }, mine.map((x) => h('li', null,
-              h('button', { class: 'link', onclick: () => editSystem(x) }, `${x.id} · ${x.system || x.type || ''}`),
-              h('span', { class: 'muted' }, ` · ${x.tracking} · ${x.tracked_via}`)))) : h('p', { class: 'muted' }, 'No solar here.')),
-          h('div', null, h('h3', null, 'Extra items'), h('p', { class: site.extra_items ? null : 'muted' }, site.extra_items || 'None recorded.'),
-            site.notes ? h('p', { class: 'muted', style: 'margin-top:6px' }, site.notes) : null)));
-    });
+      const cap = mine.length ? capText(capSum(mine.filter((x) => x.tracking !== 'Retired'))) : '';
+      const line = (label, items) => h('div', { class: 'sc-line' }, h('span', { class: 'sc-k' }, label), items);
+      return h('article', { class: 'site-card', id: 'site-' + site.id },
+        h('div', { class: 'sc-head' },
+          h('h3', null, site.name),
+          w ? h('button', { class: 'link small', onclick: () => editSite(site, sites) }, 'Edit') : null),
+        site.address ? h('p', { class: 'muted sc-addr' }, site.address) : null,
+        cap ? h('p', { class: 'site-cap' }, cap) : null,
+        line('EB', ebs.length ? h('span', null, ebs.flatMap((c, i) => [i ? ', ' : '', w ? h('button', { class: 'link', onclick: () => editConn(c, site) }, c.label) : c.label,
+          c.service_no ? h('span', { class: 'muted' }, ' ' + c.service_no) : null])) : h('span', { class: 'muted' }, 'none')),
+        line('Solar', mine.length ? h('span', null, mine.flatMap((x, i) => [i ? ', ' : '', h('button', { class: 'link', onclick: () => editSystem(x) }, x.id),
+          h('span', { class: 'muted' }, ' ' + (x.system || x.type || '') + (x.tracking !== 'Live' ? ` (${x.tracking.toLowerCase()})` : ''))])) : h('span', { class: 'muted' }, 'none')),
+        site.extra_items ? line('Extra', h('span', { class: 'sc-clamp', title: site.extra_items }, site.extra_items)) : null,
+        w ? h('div', { class: 'sc-actions' },
+          h('button', { class: 'link small', onclick: () => editConn(null, site) }, '+ EB connection'),
+          h('button', { class: 'link small', onclick: () => editSystem(null, site.id) }, '+ System')) : null);
+    };
+    const types = [...new Set(sites.map((x) => (x.site_type || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const groups = [...types.map((t) => [t, sites.filter((x) => (x.site_type || '').trim() === t)]), ['Type not set', sites.filter((x) => !(x.site_type || '').trim())]]
+      .filter(([, list]) => list.length);
     const fleetCap = capSum(systemsList.filter((x) => x.tracking !== 'Retired' && x.tracking !== 'Not installed'));
-    main.replaceChildren(pageHead('Sites', `Each site holds its EB connections, its solar systems and any extra items kept there. Installed across all sites: ${capText(fleetCap)}.`,
-      canWrite() ? h('button', { class: 'btn primary', onclick: () => editSite(null, sites) }, 'Add a site') : null), ...cards);
+    main.replaceChildren(pageHead('Sites', `Sites grouped by type. Installed across all sites: ${capText(fleetCap)}.`,
+      w ? h('button', { class: 'btn primary', onclick: () => editSite(null, sites) }, 'Add a site') : null),
+      ...groups.map(([t, list]) => h('section', null, h('h2', { class: 'grp-title' }, `${t} `, h('span', { class: 'muted' }, `· ${list.length}`)),
+        h('div', { class: 'site-cards' }, list.map(card)))));
     const target = location.hash.split('/')[1];
-    if (target) { const el = document.getElementById('site-' + target); if (el) el.scrollIntoView(); }
+    if (target) { const el = document.getElementById('site-' + target); if (el) { el.scrollIntoView({ block: 'center' }); el.classList.add('flash'); } }
   }
 
   function editSite(site, sites) {
     const isNew = !site;
     const name = input('si-name', site && site.name, { required: true });
+    const known = [...new Set([...SITE_TYPES, ...sites.map((x) => x.site_type).filter(Boolean)])];
+    const stype = input('si-type', site && site.site_type, { list: 'si-type-list', placeholder: 'e.g. Hostel, School, Office' });
+    const typeList = h('datalist', { id: 'si-type-list' }, known.map((t) => h('option', { value: t })));
     const address = input('si-address', site && site.address);
     const extra = h('textarea', { id: 'si-extra', placeholder: 'Spare panels, spare inverters, batteries in storage…' }, (site && site.extra_items) || '');
     const notes = h('textarea', { id: 'si-notes' }, (site && site.notes) || '');
     openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
       e.preventDefault();
-      const row = { name: name.value.trim(), address: address.value.trim() || null, extra_items: extra.value.trim() || null, notes: notes.value.trim() || null };
+      const row = { name: name.value.trim(), site_type: stype.value.trim() || null, address: address.value.trim() || null, extra_items: extra.value.trim() || null, notes: notes.value.trim() || null };
       if (isNew) await q(sb.from('solar_sites').insert({ id: nextSiteId(row.name, sites), sort: sites.length + 1, ...row }));
       else await q(sb.from('solar_sites').update(row).eq('id', site.id));
       closeDialog(); toast(isNew ? 'Site added' : 'Site saved'); route();
     } },
       h('div', { class: 'dlg-head' }, h('h2', null, isNew ? 'Add a site' : site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
-      h('div', { class: 'form-grid' }, field('Site name', name), field('Address', address), field('Extra items', extra, 'wide'), field('Notes', notes, 'wide')),
+      h('div', { class: 'form-grid' }, field('Site name', name), field('Type of site', stype), typeList, field('Address', address, 'wide'), field('Extra items', extra, 'wide'), field('Notes', notes, 'wide')),
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save site'))));
   }
 

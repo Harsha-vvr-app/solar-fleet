@@ -219,3 +219,18 @@ ul.queue li:first-child { border-top: 0; }
 td.nw { white-space: nowrap; }
 table.bill-grid th { padding: 8px 6px; }
 table.bill-grid td.bill-cell { min-width: 66px; }
+
+/* compact site cards grouped by type */
+h2.grp-title { margin: 22px 0 10px; }
+.site-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.site-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 12px 14px; display: grid; gap: 5px; align-content: start; font-size: .9rem; min-width: 0; }
+.site-card.flash { border-color: var(--sun); box-shadow: 0 0 0 2px var(--sun-soft); }
+.sc-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.sc-head h3 { font-size: 1.02rem; margin: 0; }
+.sc-addr { font-size: .82rem; }
+.site-card .site-cap { font-size: .82rem; color: var(--warn); margin: 0; }
+.sc-line { display: grid; grid-template-columns: 50px minmax(0, 1fr); gap: 6px; }
+.sc-k { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; padding-top: 2px; }
+.sc-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sc-actions { display: flex; gap: 14px; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--line); }
+.link.small { font-size: .82rem; }
