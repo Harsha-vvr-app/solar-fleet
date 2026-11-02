@@ -893,7 +893,8 @@
     const [{ sites, conns }, methods, all] = await Promise.all([
       loadSites(), q(sb.from('solar_tracking_methods').select('name').order('sort')), q(sb.from('solar_systems').select('id'))]);
     const ro = !canWrite();
-    const nextId = () => { let k = 1; while (all.some((x) => x.id === 'S' + String(k).padStart(2, '0'))) k++; return 'S' + String(k).padStart(2, '0'); };
+    // new systems always get the next number after the highest one in use, never a gap
+    const nextId = () => 'S' + String((d3.max(all, (x) => +((x.id.match(/^S(\d+)/) || [])[1] || 0)) || 0) + 1).padStart(2, '0');
     const id = input('sy-id', s ? s.id : nextId(), { required: true });
     if (!isNew) id.disabled = true;
     const site = select('sy-site', s ? s.site_id : presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
@@ -934,7 +935,9 @@
         rated_kw: num(kw), tracking: tracking.value, tracked_via: via.value, source_id: source.value.trim() || null,
         inverter_spec: inv.value(), panel_spec: pan.value(), battery_spec: bat.value(), daylight_target_kwh: num(target),
         open_issue: issue.value.trim() || null, open_question: question.value.trim() || null, notes: notes.value.trim() || null };
-      if (isNew) await q(sb.from('solar_systems').insert({ id: id.value.trim().toUpperCase(), sort: all.length + 1, ...row }));
+      const newId = id.value.trim().toUpperCase();
+      if (isNew && all.some((x) => x.id.toUpperCase() === newId)) { toast(`${newId} is already used by another system. Pick a different ID.`, true); id.focus(); return; }
+      if (isNew) await q(sb.from('solar_systems').insert({ id: newId, sort: all.length + 1, ...row }));
       else await q(sb.from('solar_systems').update(row).eq('id', s.id));
       closeDialog(); toast(isNew ? 'System added' : 'Saved'); route();
     } },
