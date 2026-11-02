@@ -895,8 +895,8 @@
     const ro = !canWrite();
     // new systems always get the next number after the highest one in use, never a gap
     const nextId = () => 'S' + String((d3.max(all, (x) => +((x.id.match(/^S(\d+)/) || [])[1] || 0)) || 0) + 1).padStart(2, '0');
-    const id = input('sy-id', s ? s.id : nextId(), { required: true });
-    if (!isNew) id.disabled = true;
+    const id = input('sy-id', s ? s.id : nextId(), { required: true, readonly: true, title: 'IDs are given by the app and cannot be changed' });
+    id.disabled = true;
     const site = select('sy-site', s ? s.site_id : presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
     site.required = true;
     const conn = select('sy-conn', '', [['', 'Not linked']]);
@@ -943,7 +943,7 @@
     } },
       h('div', { class: 'dlg-head' }, h('h2', null, isNew ? 'Add a system' : `${s.id} · ${s.site}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
       h('div', { class: 'form-grid' },
-        field('Site', site), field('ID', id), field('System name', system), field('Type', type),
+        field('Site', site), field('ID (given by the app)', id), field('System name', system), field('Type', type),
         field('Rated kW', kw), field('EB connection', conn), field('Tracking', tracking), field('Tracked via', via),
         field('Device or station ID', source)),
       h('fieldset', { class: 'spec-set' }, h('legend', null, 'Inverters'), inv),
@@ -1035,7 +1035,7 @@
     ['Sites', 'Leave Site ID blank for a new site. A row whose Site ID or Site name matches an existing site updates that site.'],
     ['EB connections', 'Site name must match a site in the app or on the Sites tab. A connection with the same name at the same site is updated.'],
     ['', 'Set Tracking to Live once its smart meter is sending readings. New connections get a code like E14, shown in the app.'],
-    ['Systems', 'Leave System ID blank for a new system (an ID like S22 is given). Type: ' + SYS_TYPES.join(', ') + '. Tracking: ' + TRACKING.join(', ') + '.'],
+    ['Systems', 'Leave System ID blank for a new system; the app gives it the next free ID. You cannot pick your own ID. Type: ' + SYS_TYPES.join(', ') + '. Tracking: ' + TRACKING.join(', ') + '.'],
     ['', 'A system with two kinds of panel, inverter or battery: add a second row with the same System ID and fill only those columns.'],
     ['', 'EB connection is the connection name at that site. Battery volts: 12 for a lead-acid battery, 51.2 for a 51.2 V lithium pack.'],
     ['Tasks', 'Every row becomes a new open task. Due date is required (for example 15/11/2026). The same task, site and date is not added twice.'],
@@ -1178,7 +1178,7 @@
     // systems: rows grouped by System ID; blank ID = new system
     const methodBy = new Map(cur.methods.map((m) => [low(m), m]));
     const usedIds = new Set(cur.systems.map((x) => x.id));
-    const nextSys = () => { let k = 1; while (usedIds.has('S' + String(k).padStart(2, '0'))) k++; const id = 'S' + String(k).padStart(2, '0'); usedIds.add(id); return id; };
+    const nextSys = () => { const top = Math.max(0, ...[...usedIds].map((x) => +((x.match(/^S(\d+)/) || [])[1] || 0))); const id = 'S' + String(top + 1).padStart(2, '0'); usedIds.add(id); return id; };
     const groups = [];
     rowsOf('Systems').forEach((r) => {
       const id = str(r['System ID']) && String(r['System ID']).trim().toUpperCase();
@@ -1226,8 +1226,8 @@
         const upd = Object.fromEntries(Object.entries(fields).filter(([k, v]) => v != null && JSON.stringify(v) !== JSON.stringify(existing[k] ?? null)));
         plan.systems.push({ kind: Object.keys(upd).length || connId ? 'update' : 'same', id: existing.id, row: upd, conn: connId, label: `${existing.id} · ${site.name}` });
       } else {
-        if (g.id && !/^[A-Z0-9-]{1,12}$/.test(g.id)) { errors.push(`${where}: System ID "${g.id}" should be short, like S22.`); return; }
-        const id = g.id || nextSys(); usedIds.add(id);
+        if (g.id) { errors.push(`${where}: there is no system ${g.id}. Leave System ID blank for a new system; the app gives it the next ID.`); return; }
+        const id = nextSys();
         plan.systems.push({ kind: 'new', id, conn: connId, label: `${id} · ${site.name}`,
           row: { id, sort: usedIds.size, inverter_spec: [], panel_spec: [], battery_spec: [], ...fields, tracking: trackOk || 'Pending', tracked_via: viaOk || 'Not tracked yet', type: typeOk || 'Off-grid' } });
       }
