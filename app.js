@@ -679,7 +679,7 @@
         cap ? h('p', { class: 'site-cap' }, cap) : null,
         line('EB', ebs.length ? h('span', null, ebs.flatMap((c, i) => [i ? h('br') : '', h('span', { class: 'dot ' + (c.tracking === 'Live' ? 'on' : c.tracking === 'Retired' ? 'off' : 'wait'), title: c.tracking === 'Live' ? 'Tracked' : c.tracking }),
           w ? h('button', { class: 'link', onclick: () => editConn(c, site) }, c.label) : c.label,
-          h('span', { class: 'muted' }, ` ${c.code}${c.tracking === 'Live' ? '' : ' · not tracked'}`)])) : h('span', { class: 'due-bad' }, 'none entered')),
+          h('span', { class: 'muted' }, ` ${c.code}${c.service_no ? ' · ' + c.service_no : ''}${c.incharge ? ' · ' + c.incharge : ''}${c.tracking === 'Live' ? '' : ' · not tracked'}`)])) : h('span', { class: 'due-bad' }, 'none entered')),
         line('Solar', mine.length ? h('span', null, mine.flatMap((x, i) => [i ? ', ' : '', h('button', { class: 'link', onclick: () => editSystem(x) }, x.id),
           h('span', { class: 'muted' }, ' ' + (x.system || x.type || '') + (x.tracking !== 'Live' ? ` · ${x.tracking === 'Pending' ? 'not tracked' : x.tracking.toLowerCase()}` : ''))])) : h('span', { class: 'muted' }, 'none')),
         (() => { const mt = openTasks.filter((t) => t.site_id === site.id); return mt.length ? line('Tasks', h('span', null, mt.flatMap((t, i) => [i ? h('br') : '',
@@ -730,6 +730,8 @@
     const via = select('eb-via', c ? c.tracked_via : 'Not tracked yet', methods);
     const device = input('eb-device', c && c.source_id, { placeholder: 'Meter or device ID' });
     const target = input('eb-target', c && c.daylight_target_kwh, { type: 'number', step: 'any', min: 0 });
+    const incharge = input('eb-incharge', c && c.incharge, { placeholder: 'Who handles this line' });
+    const phone = input('eb-phone', c && c.contact_phone, { type: 'tel' });
     const label = input('eb-label', c ? c.label : site.name, { required: true });
     const service = input('eb-service', c && c.service_no);
     const tariff = input('eb-tariff', c && c.tariff, { placeholder: 'e.g. LT IA, LT CT' });
@@ -742,14 +744,15 @@
       e.preventDefault();
       const row = { label: label.value.trim(), service_no: service.value.trim() || null, tariff: tariff.value.trim() || null, phase: phase.value || null,
         sanctioned_kw: num(kw), ct_multiplier: num(ct), notes: notes.value.trim() || null,
-        tracking: tracking.value, tracked_via: via.value, source_id: device.value.trim() || null, daylight_target_kwh: num(target) };
+        tracking: tracking.value, tracked_via: via.value, source_id: device.value.trim() || null, daylight_target_kwh: num(target),
+        incharge: incharge.value.trim() || null, contact_phone: phone.value.trim() || null };
       if (isNew) await q(sb.from('solar_eb_connections').insert({ site_id: site.id, ...row }));
       else await q(sb.from('solar_eb_connections').update(row).eq('id', c.id));
       closeDialog(); toast('EB connection saved'); route();
     } },
       h('div', { class: 'dlg-head' }, h('h2', null, (isNew ? 'Add an EB connection · ' : `${c.code} · `) + site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
-      h('div', { class: 'form-grid' }, field('Name', label), field('Service number', service), field('Tariff', tariff), field('Phase', phase),
-        field('Sanctioned load (kW)', kw), field('Meter CT multiplier', ct)),
+      h('div', { class: 'form-grid' }, field('Name', label), field('Consumer number', service), field('Tariff', tariff), field('Phase', phase),
+        field('Sanctioned load (kW)', kw), field('Meter CT multiplier', ct), field('In charge', incharge), field('Mobile', phone)),
       h('fieldset', { class: 'spec-set' }, h('legend', null, 'Tracking'),
         h('p', { class: 'muted' }, isNew ? 'A code like E14 is given when you save. The meter logger sends readings under that code.' : `Readings for this line are sent under the code ${c.code}.`),
         h('div', { class: 'form-grid' }, field('Tracking', tracking), field('Tracked via', via), field('Meter or device ID', device), field('Daylight import target (units/day)', target))),
