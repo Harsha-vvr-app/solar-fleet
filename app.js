@@ -541,7 +541,46 @@
       const s = await sb.storage.from('solar-bills').createSignedUrl(b.file_path, 600);
       link = s.data && s.data.signedUrl;
     }
-    const note = h('textarea', { id: 'bd-note', placeholder: 'Needed when rejecting' }, b.review_note || '');
+    // context: earlier bills on the same line, your last comment, and notes on the line, site and systems
+    const [prevBills, conn, site, sysList, tasks] = await Promise.all([
+      b.eb_connection_id || b.site_id ? q(sb.from('solar_eb_bills').select('id, period_to, bill_date, billed_kwh, import_kwh, amount, status, review_note, reviewed_at')
+        .eq(b.eb_connection_id ? 'eb_connection_id' : 'site_id', b.eb_connection_id || b.site_id).neq('id', b.id).order('period_to', { ascending: false }).limit(24)) : Promise.resolve([]),
+      b.eb_connection_id ? q(sb.from('solar_eb_connections').select('*').eq('id', b.eb_connection_id).maybeSingle()) : Promise.resolve(null),
+      b.site_id ? q(sb.from('solar_sites').select('*').eq('id', b.site_id).maybeSingle()) : Promise.resolve(null),
+      b.site_id ? q(sb.from('solar_system_status').select('id, system, type, tracking, attention, notes, open_issue').eq('site_id', b.site_id).order('sort')) : Promise.resolve([]),
+      b.site_id ? q(sb.from('solar_tickets').select('id, reason, due, type').eq('site_id', b.site_id).neq('status', 'Closed').order('due')) : Promise.resolve([]),
+    ]);
+    const myDate = b.period_to || b.bill_date || '';
+    const earlier = prevBills.filter((x) => (x.period_to || x.bill_date || '') <= myDate);
+    const lastComment = prevBills.find((x) => x.review_note && x.status !== 'Submitted');
+    const units = (x) => +(x.billed_kwh ?? x.import_kwh);
+    const change = (a, p) => (a && p ? Math.round(((a - p) / p) * 100) : null);
+    const pct = (v) => (v == null ? '' : ` (${v > 0 ? '+' : ''}${v}%)`);
+    const prev = earlier[0];
+    const yearAgo = earlier.find((x) => myDate && x.period_to && Math.abs((Date.parse(myDate) - Date.parse(x.period_to)) / 864e5 - 365) <= 25);
+    const ctxBlock = (title, ...kids) => { const k = kids.flat().filter(Boolean); return k.length ? h('div', { class: 'ctx' }, h('h3', null, title), ...k) : null; };
+    const context = h('div', { class: 'ctx-grid' },
+      ctxBlock('Your comment last time',
+        lastComment ? [h('p', { class: 'ctx-quote' }, lastComment.review_note), h('p', { class: 'muted' }, `On the bill to ${fmtDate(lastComment.period_to || lastComment.bill_date)} · ${lastComment.status.toLowerCase()}`)]
+          : h('p', { class: 'muted' }, 'No comment on earlier bills for this line.')),
+      ctxBlock('Against earlier bills',
+        prev ? h('p', null, `Previous bill: ${n0(units(prev))} units, ₹${d3.format(',.0f')(prev.amount)}. This one is ${n0(units(b))} units${pct(change(units(b), units(prev)))}, ₹${d3.format(',.0f')(b.amount)}${pct(change(+b.amount, +prev.amount))}.`) : h('p', { class: 'muted' }, 'No earlier bill for this line.'),
+        yearAgo ? h('p', null, `Same bill last year: ${n0(units(yearAgo))} units, ₹${d3.format(',.0f')(yearAgo.amount)}${pct(change(units(b), units(yearAgo)))} on units.`) : null,
+        earlier.length ? h('p', { class: 'muted' }, 'Recent: ' + earlier.slice(0, 6).map((x) => `${d3.utcFormat('%b %y')(new Date(x.period_to || x.bill_date))} ${n0(units(x))}`).join(' · ')) : null),
+      ctxBlock('EB line', conn ? [
+        h('p', null, [conn.code, conn.label, conn.service_no, conn.sanctioned_kw != null ? conn.sanctioned_kw + ' kW sanctioned' : null, conn.tariff].filter(Boolean).join(' · ')),
+        conn.incharge || conn.contact_phone ? h('p', null, `In charge: ${[conn.incharge, conn.contact_phone].filter(Boolean).join(', ')}`) : null,
+        conn.notes ? h('p', { class: 'ctx-notes' }, conn.notes) : null] : null),
+      ctxBlock('Site', site ? [
+        h('p', null, h('a', { href: '#sites/' + site.id, onclick: closeDialog }, site.name), site.site_type ? ` · ${site.site_type}` : ''),
+        site.notes ? h('p', { class: 'ctx-notes' }, site.notes) : null,
+        site.extra_items ? h('p', { class: 'muted' }, 'Extra items: ' + site.extra_items) : null,
+        tasks.length ? h('p', null, 'Open: ' + tasks.map((t) => `${t.reason}${t.due ? ' (due ' + fmtDay(t.due) + ')' : ''}`).join('; ')) : null] : null),
+      ctxBlock('Solar systems here', sysList.map((x) => h('div', { class: 'ctx-sys' },
+        h('p', null, h('strong', null, `${x.id} ${x.system || x.type || ''}`), ` · ${x.tracking === 'Live' ? (x.attention && !['OK', 'Open item'].includes(x.attention) ? x.attention : 'tracked, OK') : x.tracking === 'Pending' ? 'not tracked yet' : x.tracking.toLowerCase()}`),
+        x.open_issue ? h('p', { class: 'due-bad' }, x.open_issue) : null,
+        x.notes ? h('p', { class: 'ctx-notes' }, x.notes) : null))));
+    const note = h('textarea', { id: 'bd-note', placeholder: 'Your comment on this bill. Shown next time a bill for this line comes in. Needed when rejecting.' }, b.review_note || '');
     const review = async (status) => {
       if (status === 'Rejected' && !note.value.trim()) { toast('Add a note saying why the bill is rejected.', true); note.focus(); return; }
       await q(sb.from('solar_eb_bills').update({ status, review_note: note.value.trim() || null }).eq('id', b.id));
@@ -559,7 +598,8 @@
         kv('Status', b.status === 'Submitted' ? 'Awaiting approval' : b.status)),
       b.notes ? h('p', null, b.notes) : null,
       link ? h('p', null, h('a', { href: link, target: '_blank', rel: 'noopener' }, 'Open the bill file')) : h('p', { class: 'muted' }, 'No file attached.'),
-      isOwner() && b.status === 'Submitted' ? h('div', { class: 'form-grid' }, field('Review note', note, 'wide')) : (b.review_note ? h('p', null, 'Review note: ' + b.review_note) : null),
+      context,
+      isOwner() && b.status === 'Submitted' ? h('div', { class: 'form-grid' }, field('Your comment', note, 'wide')) : (b.review_note ? h('p', null, 'Your comment: ' + b.review_note) : null),
       isOwner() && b.status === 'Submitted' ? h('div', { class: 'actions' },
         h('button', { class: 'btn reject', onclick: () => review('Rejected') }, 'Reject'),
         h('button', { class: 'btn approve', onclick: () => review('Approved') }, 'Approve')) : null));

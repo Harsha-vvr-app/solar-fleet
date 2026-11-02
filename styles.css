@@ -286,3 +286,12 @@ a.cov { display: grid; gap: 6px; color: inherit; text-decoration: none; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--line); }
 .dot.on { background: var(--ok); }
 .dot.wait { background: var(--sun); }
+
+/* bill context */
+.ctx-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 14px 0; }
+.ctx { border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; font-size: .9rem; display: grid; gap: 4px; align-content: start; }
+.ctx h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 2px; }
+.ctx-quote { border-left: 3px solid var(--sun); padding-left: 8px; font-style: italic; }
+.ctx-notes { white-space: pre-line; color: var(--muted); }
+.ctx-sys + .ctx-sys { border-top: 1px dashed var(--line); padding-top: 4px; }
+#dialog .dlg { max-width: 900px; }
