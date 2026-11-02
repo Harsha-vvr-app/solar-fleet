@@ -447,12 +447,14 @@
         h('span', { class: 'u' }, n0(b.billed_kwh ?? b.import_kwh)), h('span', { class: 'a' }, b.amount == null ? '' : '₹' + d3.format('.3~s')(b.amount)))));
     };
     const grid = h('div', { class: 'table-wrap' }, h('table', { class: 'bill-grid' },
-      h('thead', null, h('tr', null, h('th', null, 'EB connection'), months.map((m) => h('th', { class: 'n' }, mLabel(m))))),
-      sites.filter((site) => conns.some((c) => c.site_id === site.id)).map((site) => h('tbody', null,
-        h('tr', { class: 'group' }, h('th', { colspan: months.length + 1 }, h('a', { href: '#sites/' + site.id }, site.name))),
-        conns.filter((c) => c.site_id === site.id).map((c) => h('tr', null,
-          h('th', { class: 'conn' }, c.label, c.service_no ? h('span', { class: 'muted' }, ' · ' + c.service_no) : null),
-          months.map((m) => cell(c, m))))))));
+      h('thead', null, h('tr', null, h('th', null, 'Site'), months.map((m) => h('th', { class: 'n' }, mLabel(m))))),
+      h('tbody', null, sites.flatMap((site) => {
+        const mine = conns.filter((c) => c.site_id === site.id && c.tracking !== 'Retired');
+        if (!mine.length) return [];
+        if (mine.length === 1) return [h('tr', null, h('th', { class: 'conn' }, h('a', { href: '#sites/' + site.id }, site.name)), months.map((m) => cell(mine[0], m)))];
+        return [h('tr', { class: 'group' }, h('th', { colspan: months.length + 1 }, h('a', { href: '#sites/' + site.id }, site.name), h('span', { class: 'muted' }, ` · ${mine.length} EB lines`))),
+          ...mine.map((c) => h('tr', null, h('th', { class: 'conn sub' }, c.label), months.map((m) => cell(c, m))))];
+      }))));
 
     const plainTable = (rows) => h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, ['Site', 'Period', 'Billed kWh', 'Amount ₹', 'Status', ''].map((c, i) => h('th', { class: i === 2 || i === 3 ? 'n' : null }, c)))),
@@ -542,14 +544,17 @@
       link = s.data && s.data.signedUrl;
     }
     // context: earlier bills on the same line, your last comment, and notes on the line, site and systems
-    const [prevBills, conn, site, sysList, tasks] = await Promise.all([
+    const [prevBills, conn, site, sysList, tasks, siteConns] = await Promise.all([
       b.eb_connection_id || b.site_id ? q(sb.from('solar_eb_bills').select('id, period_to, bill_date, billed_kwh, import_kwh, amount, status, review_note, reviewed_at')
         .eq(b.eb_connection_id ? 'eb_connection_id' : 'site_id', b.eb_connection_id || b.site_id).neq('id', b.id).order('period_to', { ascending: false }).limit(24)) : Promise.resolve([]),
       b.eb_connection_id ? q(sb.from('solar_eb_connections').select('*').eq('id', b.eb_connection_id).maybeSingle()) : Promise.resolve(null),
       b.site_id ? q(sb.from('solar_sites').select('*').eq('id', b.site_id).maybeSingle()) : Promise.resolve(null),
       b.site_id ? q(sb.from('solar_system_status').select('id, system, type, tracking, attention, notes, open_issue').eq('site_id', b.site_id).order('sort')) : Promise.resolve([]),
       b.site_id ? q(sb.from('solar_tickets').select('id, reason, due, type').eq('site_id', b.site_id).neq('status', 'Closed').order('due')) : Promise.resolve([]),
+      b.site_id ? q(sb.from('solar_eb_connections').select('id').eq('site_id', b.site_id).neq('tracking', 'Retired')) : Promise.resolve([]),
     ]);
+    const multiLine = siteConns.length > 1;
+    const title = site ? site.name + (multiLine && conn ? ' · ' + conn.label : '') : b.site;
     const myDate = b.period_to || b.bill_date || '';
     const earlier = prevBills.filter((x) => (x.period_to || x.bill_date || '') <= myDate);
     const lastComment = prevBills.find((x) => x.review_note && x.status !== 'Submitted');
@@ -567,12 +572,11 @@
         prev ? h('p', null, `Previous bill: ${n0(units(prev))} units, ₹${d3.format(',.0f')(prev.amount)}. This one is ${n0(units(b))} units${pct(change(units(b), units(prev)))}, ₹${d3.format(',.0f')(b.amount)}${pct(change(+b.amount, +prev.amount))}.`) : h('p', { class: 'muted' }, 'No earlier bill for this line.'),
         yearAgo ? h('p', null, `Same bill last year: ${n0(units(yearAgo))} units, ₹${d3.format(',.0f')(yearAgo.amount)}${pct(change(units(b), units(yearAgo)))} on units.`) : null,
         earlier.length ? h('p', { class: 'muted' }, 'Recent: ' + earlier.slice(0, 6).map((x) => `${d3.utcFormat('%b %y')(new Date(x.period_to || x.bill_date))} ${n0(units(x))}`).join(' · ')) : null),
-      ctxBlock('EB line', conn ? [
-        h('p', null, [conn.code, conn.label, conn.service_no, conn.sanctioned_kw != null ? conn.sanctioned_kw + ' kW sanctioned' : null, conn.tariff].filter(Boolean).join(' · ')),
-        conn.incharge || conn.contact_phone ? h('p', null, `In charge: ${[conn.incharge, conn.contact_phone].filter(Boolean).join(', ')}`) : null,
-        conn.notes ? h('p', { class: 'ctx-notes' }, conn.notes) : null] : null),
       ctxBlock('Site', site ? [
         h('p', null, h('a', { href: '#sites/' + site.id, onclick: closeDialog }, site.name), site.site_type ? ` · ${site.site_type}` : ''),
+        conn ? h('p', null, [conn.service_no && 'Consumer no. ' + conn.service_no, conn.sanctioned_kw != null ? conn.sanctioned_kw + ' kW sanctioned' : null].filter(Boolean).join(' · ')) : null,
+        conn && (conn.incharge || conn.contact_phone) ? h('p', null, `In charge: ${[conn.incharge, conn.contact_phone].filter(Boolean).join(', ')}`) : null,
+        conn && conn.notes ? h('p', { class: 'ctx-notes' }, conn.notes) : null,
         site.notes ? h('p', { class: 'ctx-notes' }, site.notes) : null,
         site.extra_items ? h('p', { class: 'muted' }, 'Extra items: ' + site.extra_items) : null,
         tasks.length ? h('p', null, 'Open: ' + tasks.map((t) => `${t.reason}${t.due ? ' (due ' + fmtDay(t.due) + ')' : ''}`).join('; ')) : null] : null),
@@ -588,9 +592,9 @@
     };
     const kv = (k, v) => h('div', { class: 'field' }, h('label', null, k), h('div', { class: 'num' }, v));
     openDialog(h('div', { class: 'dlg' },
-      h('div', { class: 'dlg-head' }, h('h2', null, b.site), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
+      h('div', { class: 'dlg-head' }, h('h2', null, title), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
       h('div', { class: 'form-grid' },
-        kv('Service number', b.service_no || '—'), kv('Bill date', fmtDate(b.bill_date)),
+        kv('Consumer number', b.service_no || '—'), kv('Bill date', fmtDate(b.bill_date)),
         kv('Period', b.period_from ? `${fmtDate(b.period_from)} to ${fmtDate(b.period_to)}` : '—'),
         kv('Units imported', n0(b.import_kwh)), kv('Units exported', n0(b.export_kwh)), kv('Units billed', n0(b.billed_kwh)),
         kv('Amount', b.amount == null ? '—' : '₹' + d3.format(',.0f')(b.amount)),
