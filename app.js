@@ -1294,5 +1294,21 @@
       status);
   }
 
+  // Reload once when a newer version of the app has been published (browsers keep old copies).
+  async function checkForUpdate() {
+    try {
+      const mine = (document.querySelector('script[src*="app.js"]') || {}).src || '';
+      const cur = (mine.match(/v=([\w-]+)/) || [])[1];
+      const html = await fetch('index.html?check=' + Date.now(), { cache: 'no-store' }).then((r) => r.text());
+      const live = (html.match(/app\.js\?v=([\w-]+)/) || [])[1];
+      if (cur && live && cur !== live && sessionStorage.getItem('solar-reloaded') !== live) {
+        sessionStorage.setItem('solar-reloaded', live);
+        location.reload();
+      }
+    } catch (e) { /* offline: keep the current copy */ }
+  }
+  checkForUpdate();
+  setInterval(checkForUpdate, 30 * 60 * 1000);
+
   boot();
 })();
