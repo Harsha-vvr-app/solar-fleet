@@ -102,7 +102,7 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable };
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
@@ -1015,6 +1015,105 @@
       h('section', { class: 'panel' }, h('div', { class: 'table-wrap' }, h('table', null,
         h('thead', null, h('tr', null, ['Name', 'Username', 'Role'].map((c) => h('th', null, c)))),
         h('tbody', null, list.map((u) => h('tr', null, h('td', null, u.name), h('td', null, u.login), h('td', null, u.role))))))));
+  }
+
+  /* ---------- all sites in one table ---------- */
+  const siteTableState = { q: '', type: '', sort: 'name', dir: 1 };
+  async function siteTable() {
+    const [{ sites, conns }, systemsList, billsAll, open] = await Promise.all([
+      loadSites(),
+      q(sb.from('solar_system_status').select('*').order('sort')),
+      q(sb.from('solar_eb_bills').select('id, site_id, eb_connection_id, period_to, bill_date, billed_kwh, import_kwh, export_kwh, amount, status, review_note, site, service_no, period_from, notes, uploaded_at, uploaded_by_name, file_path')
+        .order('period_to', { ascending: false, nullsFirst: false })),
+      q(sb.from('solar_tickets').select('id, site_id, type, due, reason').neq('status', 'Closed')),
+    ]);
+    const t0 = today();
+    const units = (b) => (b ? +(b.billed_kwh ?? b.import_kwh) : null);
+    const rows = sites.map((site) => {
+      const lines = conns.filter((c) => c.site_id === site.id && c.tracking !== 'Retired');
+      const sys = systemsList.filter((x) => x.site_id === site.id && x.tracking !== 'Retired');
+      const bills = billsAll.filter((b) => b.site_id === site.id).slice(0, 3);
+      const c = capSum(sys);
+      const mine = open.filter((t) => t.site_id === site.id);
+      const change = bills[0] && bills[1] && units(bills[1]) ? Math.round(((units(bills[0]) - units(bills[1])) / units(bills[1])) * 100) : null;
+      const problems = sys.filter((x) => x.tracking === 'Live' && x.attention && !['OK', 'Open item'].includes(x.attention));
+      return { site, lines, sys, bills, c, change, problems,
+        tickets: mine.filter((t) => t.type !== 'Task' && t.type !== 'Setup'), tasks: mine.filter((t) => t.type === 'Task'),
+        overdue: mine.filter((t) => t.due && t.due < t0 && t.type !== 'Setup').length };
+    });
+    const sorters = {
+      name: (r) => r.site.name.toLowerCase(), type: (r) => (r.site.site_type || 'zzz').toLowerCase(),
+      sanctioned: (r) => d3.sum(r.lines, (l) => +l.sanctioned_kw || 0), solar: (r) => r.c.kwp,
+      bill: (r) => (r.bills[0] ? +r.bills[0].amount : -1), units: (r) => (r.bills[0] ? units(r.bills[0]) : -1),
+      change: (r) => (r.change == null ? -1e9 : r.change), open: (r) => r.tickets.length + r.tasks.length,
+    };
+    const body = h('div', { class: 'table-wrap' });
+    const fmtBill = (b) => b ? h('button', { class: 'bill-mini' + (b.status === 'Submitted' ? ' wait' : b.status === 'Rejected' ? ' bad' : ''), onclick: () => billDetail(b),
+      title: b.status === 'Submitted' ? 'Awaiting approval' : b.status },
+      h('span', { class: 'd' }, d3.utcFormat('%b %y')(new Date(b.period_to || b.bill_date))),
+      h('span', { class: 'u' }, n0(units(b)) + ' u'), h('span', { class: 'a' }, b.amount == null ? '' : '₹' + d3.format(',.0f')(b.amount))) : h('span', { class: 'muted' }, '—');
+    const cols = [
+      ['Site', 'name'], ['Type', 'type'], ['Consumer no.', null], ['Sanctioned', 'sanctioned'], ['In charge', null], ['Solar', 'solar'],
+      ['Latest bill', 'bill'], ['Bill before', null], ['Bill before that', null], ['Units vs last', 'change'], ['Open', 'open'],
+    ];
+    function draw() {
+      const qq = siteTableState.q.trim().toLowerCase();
+      let list = rows.filter((r) => (!siteTableState.type || (r.site.site_type || '') === siteTableState.type)
+        && (!qq || [r.site.name, r.site.site_type, ...r.lines.map((l) => `${l.service_no} ${l.incharge} ${l.contact_phone}`), ...r.sys.map((x) => x.id)].join(' ').toLowerCase().includes(qq)));
+      const key = sorters[siteTableState.sort];
+      list = list.slice().sort((a, b) => { const x = key(a), y = key(b); return (x < y ? -1 : x > y ? 1 : 0) * siteTableState.dir; });
+      const head = h('tr', null, cols.map(([label, k]) => h('th', { class: (['sanctioned', 'change', 'open'].includes(k) ? 'n ' : '') + (k ? 'sortable' : ''),
+        onclick: k ? () => { siteTableState.dir = siteTableState.sort === k ? -siteTableState.dir : (['name', 'type'].includes(k) ? 1 : -1); siteTableState.sort = k; draw(); } : null },
+        label, k && siteTableState.sort === k ? (siteTableState.dir > 0 ? ' ▲' : ' ▼') : '')));
+      const totalLatest = d3.sum(list, (r) => (r.bills[0] ? +r.bills[0].amount : 0));
+      body.replaceChildren(h('table', { class: 'site-table' },
+        h('thead', null, head),
+        h('tbody', null, list.map((r) => h('tr', null,
+          h('td', { class: 'st-name' }, h('a', { href: '#sites/' + r.site.id }, r.site.name),
+            r.problems.length ? h('div', { class: 'due-bad small' }, r.problems.map((x) => `${x.id}: ${x.attention}`).join('; ')) : null),
+          h('td', null, r.site.site_type || h('span', { class: 'muted' }, '—')),
+          h('td', { class: 'nw' }, r.lines.length ? r.lines.flatMap((l, i) => [i ? h('br') : '', l.service_no || h('span', { class: 'due-bad' }, 'missing')]) : h('span', { class: 'muted' }, 'no EB line')),
+          h('td', { class: 'n nw' }, r.lines.length ? r.lines.flatMap((l, i) => [i ? h('br') : '', l.sanctioned_kw != null ? l.sanctioned_kw + ' kW' : '—']) : '—'),
+          h('td', null, r.lines.flatMap((l, i) => [i ? h('br') : '', [l.incharge, l.contact_phone].filter(Boolean).join(' · ') || h('span', { class: 'muted' }, '—')])),
+          h('td', { class: 'st-solar' }, r.sys.length ? [
+            ...[r.c.inv && n0(r.c.inv) + ' kW inverter', r.c.kwp && n1(r.c.kwp) + ' kWp panels', r.c.bat && n0(r.c.bat) + ' kWh battery'].filter(Boolean).map((t) => h('div', { class: 'nw' }, t)),
+            h('div', { class: 'muted small nw' }, `${r.sys.filter((x) => x.tracking === 'Live').length} of ${r.sys.length} tracked`)] : h('span', { class: 'muted' }, 'none')),
+          h('td', null, fmtBill(r.bills[0])), h('td', null, fmtBill(r.bills[1])), h('td', null, fmtBill(r.bills[2])),
+          h('td', { class: 'n ' + (r.change > 15 ? 'due-bad' : r.change < -15 ? 'good' : '') }, r.change == null ? '—' : (r.change > 0 ? '+' : '') + r.change + '%'),
+          h('td', { class: 'n nw' }, r.tickets.length || r.tasks.length ? h('a', { href: '#tickets' }, [r.tickets.length && `${r.tickets.length} ticket${r.tickets.length > 1 ? 's' : ''}`, r.tasks.length && `${r.tasks.length} task${r.tasks.length > 1 ? 's' : ''}`].filter(Boolean).join(', '))
+            : h('span', { class: 'muted' }, '—'), r.overdue ? h('div', { class: 'due-bad small' }, `${r.overdue} overdue`) : null)))),
+        h('tfoot', null, h('tr', null, h('td', { colspan: 6 }, `${list.length} sites`), h('td', null, h('strong', null, '₹' + d3.format(',.0f')(totalLatest)), h('div', { class: 'muted small' }, 'latest bills, total')), h('td', { colspan: 4 })))));
+    }
+    const search = input('st-q', siteTableState.q, { type: 'search', placeholder: 'Site, consumer no., person or system ID' });
+    search.addEventListener('input', () => { siteTableState.q = search.value; draw(); });
+    const types = [...new Set(sites.map((x) => x.site_type).filter(Boolean))].sort();
+    const type = select('st-type', siteTableState.type, [['', 'All types'], ...types.map((t) => [t, t])]);
+    type.addEventListener('change', () => { siteTableState.type = type.value; draw(); });
+    const exportXlsx = async () => {
+      try {
+        await loadXlsx();
+        const head = ['Site', 'Type', 'Consumer no.', 'Sanctioned kW', 'In charge', 'Mobile', 'Inverter kW', 'Panel kWp', 'Battery kWh', 'Systems', 'Tracked',
+          'Bill 1 period to', 'Bill 1 units', 'Bill 1 amount', 'Bill 2 period to', 'Bill 2 units', 'Bill 2 amount', 'Bill 3 period to', 'Bill 3 units', 'Bill 3 amount', 'Open tickets', 'Open tasks'];
+        const out = rows.map((r) => {
+          const b = (i) => (r.bills[i] ? [r.bills[i].period_to || r.bills[i].bill_date, units(r.bills[i]), +r.bills[i].amount] : ['', '', '']);
+          return [r.site.name, r.site.site_type || '', r.lines.map((l) => l.service_no).filter(Boolean).join(', '), d3.sum(r.lines, (l) => +l.sanctioned_kw || 0) || '',
+            r.lines.map((l) => l.incharge).filter(Boolean).join(', '), r.lines.map((l) => l.contact_phone).filter(Boolean).join(', '),
+            r.c.inv || '', r.c.kwp || '', r.c.bat || '', r.sys.length, r.sys.filter((x) => x.tracking === 'Live').length, ...b(0), ...b(1), ...b(2), r.tickets.length, r.tasks.length];
+        });
+        const ws = XLSX.utils.aoa_to_sheet([head, ...out]);
+        // keep consumer numbers as text so the leading 0 is not lost
+        out.forEach((_, i) => { const cell = ws[XLSX.utils.encode_cell({ r: i + 1, c: 2 })]; if (cell) { cell.t = 's'; cell.z = '@'; } });
+        ws['!cols'] = head.map((x, i) => ({ wch: i === 0 ? 30 : i === 2 ? 16 : 13 }));
+        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Sites');
+        XLSX.writeFile(wb, `solar-fleet-sites-${today()}.xlsx`);
+      } catch (err) { toast(err.message || 'Could not make the file', true); }
+    };
+    draw();
+    main.replaceChildren(
+      pageHead('Site table', 'Every site on one line with its EB details, solar and its last three bills. Click a column heading to sort, a bill to open it.',
+        h('button', { class: 'btn', onclick: exportXlsx }, 'Download as Excel')),
+      h('div', { class: 'filters' }, field('Search', search), field('Type', type)),
+      h('section', { class: 'panel' }, body));
   }
 
   /* ---------- bulk upload from Excel ---------- */
