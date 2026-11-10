@@ -102,11 +102,11 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage };
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
-    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name)));
+    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : name)));
     if (name !== 'sites') window.scrollTo(0, 0);
     document.querySelectorAll('.side a[aria-current]').forEach((a) => a.setAttribute('aria-current', 'page'));
     main.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
@@ -115,93 +115,347 @@
   }
   window.addEventListener('hashchange', () => state.me && route());
 
-  /* ---------- overview ---------- */
+  /* ---------- dashboard: every site at a glance ---------- */
+  const dashState = { q: '', type: '' };
+  const siteState = { days: 30 };
+  const istDate = (ts) => (ts ? new Date(Date.parse(ts) + 19800000).toISOString().slice(0, 10) : null);
+  const isFault = (x) => x.tracking === 'Live' && x.attention && !['OK', 'Open item'].includes(x.attention);
+  const rupees = (v) => (v == null || v === '' ? '—' : '₹' + Math.round(+v).toLocaleString('en-IN'));
+  const billUnits = (b) => (b ? +(b.billed_kwh ?? b.import_kwh) : null);
+  const monthOf = (b) => d3.utcFormat('%b %y')(new Date((b.period_to || b.bill_date || b.uploaded_at).slice(0, 10) + 'T00:00:00Z'));
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
   async function overview() {
-    const [status, gen, open, notLive, waitingBills, cov] = await Promise.all([
-      q(sb.from('solar_system_status').select('*').eq('tracking', 'Live').neq('type', 'Grid meter').order('sort')),
-      q(sb.from('solar_generation').select('date, system_id, kwh, note').gte('date', addDays(today(), -15)).order('date')),
+    const t0 = today();
+    const [{ sites }, systems, gen, open, billsAll, lines] = await Promise.all([
+      loadSites(),
+      q(sb.from('solar_system_status').select('*').order('sort')),
+      q(sb.from('solar_generation').select('date, system_id, kwh, note').gte('date', addDays(t0, -16)).order('date')),
       q(sb.from('solar_tickets').select('*').neq('status', 'Closed')),
-      q(sb.from('solar_systems').select('id, tracking, type').not('tracking', 'in', '("Live","Retired")')),
-      q(sb.from('solar_eb_bills').select('*').eq('status', 'Submitted').order('uploaded_at')),
-      Promise.all([q(sb.from('solar_systems').select('tracking, type')), q(sb.from('solar_eb_connections').select('tracking')), q(sb.from('solar_sites').select('id')),
-        q(sb.from('solar_eb_connections').select('site_id'))]),
+      q(sb.from('solar_eb_bills').select('*').order('period_to', { ascending: false, nullsFirst: false })),
+      q(sb.from('solar_eb_connections').select('id, tracking')),
     ]);
-    const withExp = status.filter((s) => s.expected_kwh != null);
-    const ids = withExp.map((s) => s.id);
-    const dates = [...new Set(gen.map((g) => g.date))].sort().reverse();
-    const day = dates.find((d) => ids.every((id) => gen.some((g) => g.date === d && g.system_id === id))) || dates[0];
-    const expected = d3.sum(withExp, (s) => +s.expected_kwh);
-    const actual = d3.sum(gen.filter((g) => g.date === day && ids.includes(g.system_id)), (g) => +g.kwh || 0);
-    const pct = expected ? Math.round((actual / expected) * 100) : null;
-    const overdue = open.filter((t) => t.due && t.due < today() && t.type !== 'Setup').length;
-    const faults = open.filter((t) => t.type !== 'Setup' && t.type !== 'Task').length;
-    const tasks = open.filter((t) => t.type === 'Task').sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999')));
+    const lastDay = d3.max(gen, (g) => g.date) || addDays(t0, -1);
 
-    const fig = (v, l, cls) => h('div', { class: 'fig' + (cls ? ' ' + cls : '') }, h('div', { class: 'v' }, v), h('div', { class: 'l' }, l));
-    const head = pageHead('Overview', `${status.length} live systems. Expected figures are each system's average over its last 14 good days.`);
-    const fleet = h('section', { class: 'panel fleet' },
-      h('div', { class: 'fleet-figs' },
-        fig(n0(expected), 'units expected per day'),
-        fig(n0(actual), 'units made on ' + fmtDay(day)),
-        fig(pct == null ? '—' : pct + '%', 'of expected', pct != null && pct < 75 ? 'low' : pct != null && pct < 90 ? 'mid' : null)),
-      h('div', { class: 'fleet-figs' },
-        fig(String(faults), 'open tickets'),
-        fig(String(tasks.length), 'open tasks'),
-        fig(String(overdue), 'overdue', overdue ? 'low' : null)));
+    const cards = sites.map((site) => {
+      const sys = systems.filter((x) => x.site_id === site.id && x.tracking !== 'Retired' && x.type !== 'Grid meter');
+      const live = sys.filter((x) => x.tracking === 'Live');
+      const ids = new Set(live.map((x) => x.id));
+      const mine = gen.filter((g) => ids.has(g.system_id));
+      const byDay = d3.rollups(mine, (v) => ({ kwh: d3.sum(v, (g) => +g.kwh || 0), note: (v.find((g) => g.note) || {}).note }), (g) => g.date)
+        .map(([date, o]) => ({ date, ...o }));
+      const siteLast = d3.max(mine, (g) => g.date);
+      const made = siteLast ? d3.sum(mine.filter((g) => g.date === siteLast), (g) => +g.kwh || 0) : null;
+      const exp = d3.sum(live, (x) => +x.expected_kwh || 0) || null;
+      const faults = live.filter(isFault);
+      const tix = open.filter((t) => t.site_id === site.id);
+      const overdue = tix.filter((t) => t.due && t.due < t0 && t.type !== 'Setup');
+      const issues = tix.filter((t) => t.type !== 'Task' && t.type !== 'Setup');
+      const tasks = tix.filter((t) => t.type === 'Task');
+      const bills = billsAll.filter((b) => b.site_id === site.id);
+      const waiting = bills.filter((b) => b.status === 'Submitted');
+      const kw = d3.sum(sys, (x) => cap(x).inv);
+      let level, label, why;
+      if (faults.length) { level = 'bad'; label = 'Fault'; why = faults.map((x) => `${x.system || x.id}: ${x.attention}`).join('; '); }
+      else if (overdue.length) { level = 'bad'; label = 'Overdue'; why = `${overdue[0].reason}, due ${fmtDay(overdue[0].due)}${overdue.length > 1 ? ` (+${overdue.length - 1} more)` : ''}`; }
+      else if (issues.length) { level = 'warn'; label = 'Open issue'; why = issues[0].reason + (issues.length > 1 ? ` (+${issues.length - 1} more)` : ''); }
+      else if (waiting.length) { level = 'warn'; label = 'Bill to approve'; why = `${monthOf(waiting[0])} bill, ${rupees(waiting[0].amount)}`; }
+      else if (tasks.length) { level = 'warn'; label = 'Task open'; why = `${tasks[0].reason}${tasks[0].due ? ', due ' + fmtDay(tasks[0].due) : ''}`; }
+      else if (live.length) { level = 'ok'; label = 'OK'; why = 'Working normally'; }
+      else { level = 'idle'; label = sys.length ? 'Not tracked' : 'No solar'; why = sys.length ? 'Solar here is not sending readings yet' : 'EB connection only'; }
+      return { site, sys, live, byDay, siteLast, made, exp, faults, overdue, issues, tasks, bills, waiting, kw, level, label, why };
+    });
 
-    const rows = h('div', { class: 'sys-rows' }, status.map((s) => {
-      const mine = gen.filter((g) => g.system_id === s.id);
-      const y = mine.find((g) => g.date === day);
-      const exp = +s.expected_kwh || 0;
-      const scale = Math.max(exp * 1.4, y ? +y.kwh : 0, 1);
-      const share = y && exp ? (+y.kwh / exp) : null;
-      const bar = h('div', { class: 'sunbar', role: 'img', 'aria-label': `${s.site}: ${y ? n1(y.kwh) : 'no'} units against ${n1(exp)} expected` },
-        h('div', { class: 'fill' + (share != null && share < 0.6 ? ' low' : ''), style: `width:${y ? Math.min(100, (+y.kwh / scale) * 100) : 0}%` }),
-        exp ? h('div', { class: 'mark', style: `left:${(exp / scale) * 100}%` }) : null);
-      const att = s.attention;
-      const chipCls = !att || att === 'OK' || att === 'Open item' ? 'ok' : 'bad';
-      return h('div', { class: 'sys-row' },
-        h('div', { class: 'sys-name' }, h('strong', null, s.site), h('span', null, `${s.system || ''} · ${s.type || ''}`)),
-        h('div', null, bar, h('div', { class: 'sunbar-caption' }, (y ? `${n1(y.kwh)} units on ${fmtDay(day)}` : `No figure for ${fmtDay(day)}`) + (s.expected_kwh != null ? ` · expected ${n1(s.expected_kwh)}` : ''))),
-        h('div', { class: 'spark' }, spark(mine, day)),
-        h('span', { class: 'chip ' + (chipCls || '') }, att === 'Open item' ? 'OK' : att || 'OK'));
-    }));
-    const pendingSys = notLive.filter((x) => x.tracking !== 'Not installed').length;
-    const plannedSys = notLive.length - pendingSys;
-    const leftOff = notLive.length ? h('p', { class: 'muted' }, h('a', { href: '#systems' },
-      [pendingSys && `${pendingSys} system${pendingSys > 1 ? 's' : ''} not tracked yet`, plannedSys && `${plannedSys} planned install${plannedSys > 1 ? 's' : ''}`].filter(Boolean).join(' and ')),
-      ' are left off this list.') : null;
+    const draw = () => {
+      const qq = dashState.q.trim().toLowerCase();
+      const list = cards.filter((c) => (!dashState.type || (c.site.site_type || '') === dashState.type) && (!qq || `${c.site.name} ${c.site.site_type || ''}`.toLowerCase().includes(qq)));
+      const groups = [['bad', 'Needs attention now'], ['warn', 'Something open'], ['ok', 'Working normally'], ['idle', 'Nothing tracked yet']]
+        .map(([k, title]) => [k, title, list.filter((c) => c.level === k).sort((a, b) => a.site.name.localeCompare(b.site.name, undefined, { numeric: true }))])
+        .filter(([, , l]) => l.length);
+      grid.replaceChildren(...(groups.length ? groups.map(([k, title, l]) => h('section', null,
+        h('h2', { class: 'dash-group ' + k }, title, h('span', { class: 'muted' }, ` · ${l.length}`)),
+        h('div', { class: 'dash-grid' }, l.map(card)))) : [h('p', { class: 'empty' }, 'No sites match.')]));
+    };
+    const card = (c) => {
+      const latest = c.bills[0], prev = c.bills[1];
+      const change = latest && prev && billUnits(prev) ? Math.round(((billUnits(latest) - billUnits(prev)) / billUnits(prev)) * 100) : null;
+      const openBits = [c.issues.length && plural(c.issues.length, 'issue'), c.tasks.length && plural(c.tasks.length, 'task'), c.overdue.length && `${c.overdue.length} overdue`].filter(Boolean);
+      const low = c.made != null && c.exp && c.made < 0.6 * c.exp;
+      return h('a', { class: 'dash-card ' + c.level, href: '#site/' + c.site.id },
+        h('div', { class: 'dc-head' }, h('h3', null, c.site.name), h('span', { class: 'dc-pill ' + c.level }, c.label)),
+        h('p', { class: 'dc-why' }, c.why),
+        c.live.length ? h('div', { class: 'dc-solar' },
+          h('div', null,
+            h('div', { class: 'dc-num' + (low ? ' low' : '') }, c.made == null ? '—' : n1(c.made), h('span', null, ' units')),
+            h('div', { class: 'muted small' }, `${c.siteLast ? fmtDay(c.siteLast) : 'no reading'}${c.exp ? ' · expected ' + n0(c.exp) : ''}`)),
+          h('div', { class: 'spark' }, spark(c.byDay, lastDay)))
+          : h('p', { class: 'muted dc-nosolar' }, c.sys.length ? `${c.kw ? n0(c.kw) + ' kW solar' : 'Solar'}, not tracked yet` : 'No solar system'),
+        h('div', { class: 'dc-foot' },
+          h('span', null, latest ? [h('span', { class: 'muted' }, `${monthOf(latest)} bill `), rupees(latest.amount),
+            change != null && Math.abs(change) >= 10 ? h('span', { class: change > 0 ? 'due-bad' : 'good-text' }, ` ${change > 0 ? '+' : ''}${change}%`) : null] : h('span', { class: 'muted' }, 'No bill yet')),
+          h('span', { class: c.overdue.length ? 'due-bad' : 'muted' }, openBits.join(' · ') || 'Nothing open')));
+    };
+
+    // top strip
+    const tracked = systems.filter((x) => x.tracking === 'Live' && x.type !== 'Grid meter');
+    const allSys = systems.filter((x) => x.tracking !== 'Retired' && x.type !== 'Grid meter');
+    const fresh = tracked.filter((x) => gen.some((g) => g.system_id === x.id && g.date === lastDay));
+    const made = d3.sum(gen.filter((g) => g.date === lastDay && fresh.some((x) => x.id === g.system_id)), (g) => +g.kwh || 0);
+    const exp = d3.sum(fresh, (x) => +x.expected_kwh || 0);
+    const overdueAll = open.filter((t) => t.due && t.due < t0 && t.type !== 'Setup').length;
+    const waitingBills = billsAll.filter((b) => b.status === 'Submitted');
+    const liveLines = lines.filter((l) => l.tracking === 'Live').length, allLines = lines.filter((l) => l.tracking !== 'Retired').length;
+    const fig = (v, l, cls, href) => h(href ? 'a' : 'div', { class: 'fig' + (cls ? ' ' + cls : ''), href }, h('div', { class: 'v' }, v), h('div', { class: 'l' }, l));
+    const nBad = cards.filter((c) => c.level === 'bad').length;
+    const strip = h('section', { class: 'panel dash-strip' },
+      fig(String(nBad), nBad === 1 ? 'site needs attention' : 'sites need attention', nBad ? 'low' : null),
+      fig(String(overdueAll), 'overdue tickets and tasks', overdueAll ? 'low' : null, '#tickets'),
+      fig(String(waitingBills.length), isOwner() ? 'bills for you to approve' : 'bills awaiting approval', waitingBills.length ? 'mid' : null, '#bills'),
+      fig(n0(made), `units on ${fmtDay(lastDay)}${exp ? ' · expected ' + n0(exp) : ''}`, exp && made < 0.75 * exp ? 'low' : null),
+      fig(`${tracked.length}/${allSys.length}`, 'solar systems tracked', null, '#systems'),
+      fig(`${liveLines}/${allLines}`, 'EB lines metered', null, '#grid'));
+
     const queue = waitingBills.length ? h('section', null, h('h2', null, isOwner() ? 'Bills waiting for your approval' : 'Bills waiting for approval'),
       h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, waitingBills.map((b) => h('li', null,
         h('button', { class: 'link', onclick: () => billDetail(b) }, b.site),
-        h('span', { class: 'muted' }, ` · ${b.period_to ? 'period to ' + fmtDate(b.period_to) : fmtDate(b.bill_date)} · ${n0(b.billed_kwh ?? b.import_kwh)} units${b.amount != null ? ' · ₹' + d3.format(',.0f')(b.amount) : ''} · from ${b.uploaded_by_name || 'admin'}`)))))) : null;
-    const [cSys, cEb, cSites, cConnSites] = cov;
-    const sysAll = cSys.filter((x) => x.type !== 'Grid meter' && x.tracking !== 'Retired');
-    const ebAll = cEb.filter((x) => x.tracking !== 'Retired');
-    const noConn = cSites.filter((x) => !cConnSites.some((c) => c.site_id === x.id)).length;
-    const meter = (label, n, of, href) => h('a', { class: 'cov', href },
-      h('div', { class: 'cov-top' }, h('strong', null, `${n} of ${of}`), h('span', { class: 'muted' }, label)),
-      h('div', { class: 'cov-bar' }, h('div', { style: `width:${of ? (n / of) * 100 : 0}%` })));
-    const coverage = h('section', { class: 'panel coverage' },
-      h('h3', null, 'Tracking coverage'),
-      h('div', { class: 'cov-grid' },
-        meter('EB lines tracked', ebAll.filter((x) => x.tracking === 'Live').length, ebAll.length, '#grid'),
-        meter('solar systems tracked', sysAll.filter((x) => x.tracking === 'Live').length, sysAll.length, '#systems')),
-      noConn ? h('p', { class: 'muted' }, h('a', { href: '#sites' }, `${noConn} site${noConn > 1 ? 's have' : ' has'} no EB connection entered`), ', so coverage there is unknown.') : null);
-    const t0 = today();
+        h('span', { class: 'muted' }, ` · ${b.period_to ? 'period to ' + fmtDate(b.period_to) : fmtDate(b.bill_date)} · ${n0(billUnits(b))} units · ${rupees(b.amount)}`)))))) : null;
+
+    const tasks = open.filter((t) => t.type === 'Task').sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999')));
     const taskSec = h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Open tasks'),
-        canWrite() ? h('button', { class: 'btn', onclick: async () => newTask((await loadSites()).sites) }, 'New task') : null),
+        canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites) }, 'New task') : null),
       h('div', { class: 'panel' }, tasks.length ? h('div', { class: 'table-wrap' }, h('table', null,
         h('thead', null, h('tr', null, ['Due', 'Site', 'Task', 'Assigned to', ''].map((c) => h('th', null, c)))),
         h('tbody', null, tasks.map((t) => h('tr', { class: 'click' + (t.due < t0 ? ' overdue' : ''), onclick: (e) => { if (!e.target.closest('button')) location.hash = 'ticket/' + t.id; } },
           h('td', { class: 'nw' + (t.due < t0 ? ' due-bad' : '') }, t.due ? fmtDay(t.due) + (t.due < t0 ? ' · overdue' : t.due === t0 ? ' · today' : '') : '—'),
           h('td', null, t.site || '—'), h('td', null, t.reason), h('td', null, t.assigned_to || '—'),
           h('td', { class: 'row-actions' }, canWrite() ? h('button', { class: 'btn small', onclick: () => closeTicketDialog(t, () => { route(); refreshCounts(); }) }, 'Done') : null))))))
-        : h('p', { class: 'empty' }, 'No open tasks. Add one from here or from a site card.')));
-    main.replaceChildren(...[head, queue, fleet, coverage, taskSec].filter(Boolean),
-      h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Each system against its expected day'),
-        h('p', { class: 'muted' }, 'The line marks the expected day. Red when a system made under 60% of it.')),
-        h('div', { class: 'panel' }, rows), leftOff));
+        : h('p', { class: 'empty' }, 'No open tasks.')));
+
+    const search = input('ds-q', dashState.q, { type: 'search', placeholder: 'Find a site' });
+    search.addEventListener('input', () => { dashState.q = search.value; draw(); });
+    const types = [...new Set(sites.map((x) => x.site_type).filter(Boolean))].sort();
+    const type = select('ds-type', dashState.type, [['', 'All types'], ...types.map((t) => [t, t])]);
+    type.addEventListener('change', () => { dashState.type = type.value; draw(); });
+    const grid = h('div', { class: 'dash-groups' });
+    draw();
+    main.replaceChildren(...[
+      pageHead('Dashboard', 'Every site at a glance. Click a site to see what happened there day by day.'),
+      strip, queue,
+      h('div', { class: 'filters' }, field('Search', search), field('Type', type)),
+      grid, taskSec].filter(Boolean));
+  }
+
+  /* ---------- one site, day by day ---------- */
+  async function sitePage(id) {
+    const t0 = today();
+    const { sites, conns } = await loadSites();
+    const site = sites.find((x) => x.id === id);
+    if (!site) { main.replaceChildren(h('p', { class: 'empty' }, 'That site was not found. ', h('a', { href: '#overview' }, 'Back to all sites'))); return; }
+    const lines = conns.filter((c) => c.site_id === id && c.tracking !== 'Retired');
+    const systems = (await q(sb.from('solar_system_status').select('*').eq('site_id', id).order('sort'))).filter((x) => x.tracking !== 'Retired');
+    const solar = systems.filter((x) => x.type !== 'Grid meter');
+    const sysIds = systems.map((x) => x.id), connIds = lines.map((c) => c.id);
+    const from = addDays(t0, -(siteState.days - 1));
+    const none = Promise.resolve([]);
+    const [gen, imp, tix, log, bills, planned] = await Promise.all([
+      sysIds.length ? q(sb.from('solar_generation').select('*').in('system_id', sysIds).gte('date', from).order('date')) : none,
+      connIds.length ? q(sb.from('solar_eb_import').select('*').in('eb_connection_id', connIds).gte('date', from).order('date')) : none,
+      q(sb.from('solar_tickets').select('*').eq('site_id', id).order('id', { ascending: false })),
+      q(sb.from('solar_site_log').select('*').eq('site_id', id).order('created_at', { ascending: false })),
+      q(sb.from('solar_eb_bills').select('*').eq('site_id', id).order('period_to', { ascending: false, nullsFirst: false })),
+      sysIds.length ? q(sb.from('solar_planned_work').select('*').in('system_id', sysIds)) : none,
+    ]);
+    const notes = tix.length ? await q(sb.from('solar_ticket_notes').select('*').in('ticket_id', tix.map((t) => t.id)).order('created_at')) : [];
+    const sysName = Object.fromEntries(systems.map((x) => [x.id, x.system || x.id]));
+    const live = solar.filter((x) => x.tracking === 'Live');
+    const exp = d3.sum(live, (x) => +x.expected_kwh || 0) || null;
+
+    // everything that happened, keyed by day
+    const events = new Map();
+    const add = (date, ev) => { if (!date || date < from || date > t0) return; if (!events.has(date)) events.set(date, []); events.get(date).push(ev); };
+    tix.forEach((t) => {
+      const task = t.type === 'Task';
+      add(t.raised, { kind: task ? 'Task added' : t.auto ? 'Ticket raised' : 'Ticket added', cls: task ? 'task' : 'bad', text: t.reason, href: '#ticket/' + t.id });
+      if (t.status === 'Closed') add(t.closed_on, { kind: task ? 'Task done' : 'Ticket closed', cls: 'ok', text: t.reason + (t.resolution ? ': ' + t.resolution : ''), href: '#ticket/' + t.id });
+    });
+    notes.forEach((n) => add(istDate(n.created_at), { kind: 'Ticket note', cls: 'note', text: `${n.body}${n.author_name ? ' (' + n.author_name + ')' : ''}`, href: '#ticket/' + n.ticket_id }));
+    log.forEach((n) => add(n.date, { kind: 'Note', cls: 'note', text: n.body, by: n.author_name, log: n }));
+    bills.forEach((b) => {
+      add(b.period_to || b.bill_date, { kind: 'EB bill', cls: 'bill', text: `${n0(billUnits(b))} units · ${rupees(b.amount)}${b.status === 'Submitted' ? ' · awaiting approval' : ''}`, bill: b });
+      if (b.reviewed_at && b.status !== 'Submitted') add(istDate(b.reviewed_at), { kind: 'Bill ' + b.status.toLowerCase(), cls: b.status === 'Approved' ? 'ok' : 'bad', text: `${monthOf(b)} bill${b.review_note ? ': ' + b.review_note : ''}`, bill: b });
+    });
+    planned.forEach((p) => add(p.from_date < from ? from : p.from_date, { kind: 'Planned work', cls: 'task', text: `${sysName[p.system_id] || ''}: ${p.reason || ''} (${fmtDay(p.from_date)} to ${fmtDay(p.to_date)})` }));
+    gen.filter((g) => g.note).forEach((g) => add(g.date, { kind: 'Reading note', cls: 'note', text: `${sysName[g.system_id]}: ${g.note}` }));
+
+    const solarGen = gen.filter((g) => solar.some((x) => x.id === g.system_id));
+    const genByDay = d3.rollup(solarGen, (v) => ({ total: d3.sum(v, (g) => +g.kwh || 0), parts: v }), (g) => g.date);
+    const impByDay = d3.rollup(imp, (v) => ({ daylight: d3.sum(v, (r) => +r.daylight_kwh || 0), day: d3.sum(v, (r) => +r.day_kwh || 0) }), (r) => r.date);
+    const hasMeter = solarGen.length || imp.length;
+    const daysDesc = d3.range(siteState.days).map((k) => addDays(t0, -k));
+    const shown = hasMeter ? daysDesc.filter((d) => d < t0 || genByDay.has(d) || impByDay.has(d) || events.has(d)) : daysDesc.filter((d) => events.has(d));
+
+    const evNode = (e) => {
+      const body = e.bill ? h('button', { class: 'link', onclick: () => billDetail(e.bill) }, e.text) : e.href ? h('a', { href: e.href }, e.text) : h('span', null, e.text);
+      let rm = null;
+      if (e.log && (isOwner() || e.log.author === state.user.id)) {
+        rm = h('button', { class: 'link small ev-rm' }, 'Remove');
+        rm.addEventListener('click', async () => {
+          if (rm.dataset.sure !== '1') { rm.dataset.sure = '1'; rm.textContent = 'Click again to remove'; return; }
+          await q(sb.from('solar_site_log').delete().eq('id', e.log.id)); toast('Note removed'); route();
+        });
+      }
+      return h('div', { class: 'ev ' + e.cls }, h('span', { class: 'ev-kind' }, e.kind), h('span', null, body, e.by ? h('span', { class: 'muted' }, ` · ${e.by}`) : null, rm));
+    };
+    const showSolar = live.length > 0 || solarGen.length > 0;
+    const dayRow = (d) => {
+      const g = genByDay.get(d), im = impByDay.get(d), ev = events.get(d) || [];
+      const missing = live.length && !g && d < t0;
+      const share = g && exp ? g.total / exp : null;
+      const low = g && (g.total === 0 || (share != null && share < 0.6));
+      const wk = new Date(d + 'T00:00:00Z').getUTCDay();
+      return h('tr', { id: 'day-' + d, class: (wk === 0 ? 'sunday ' : '') + (low || missing ? 'day-bad' : '') },
+        h('td', { class: 'nw day-date' }, h('strong', null, d3.utcFormat('%-d %b')(new Date(d + 'T00:00:00Z'))), h('span', { class: 'muted' }, ' ' + d3.utcFormat('%a')(new Date(d + 'T00:00:00Z')))),
+        showSolar ? h('td', { class: 'n nw' }, g ? [h('span', { class: low ? 'due-bad' : null }, n1(g.total)),
+          g.parts.length > 1 || solar.length > 1 ? h('div', { class: 'muted small' }, g.parts.map((p) => `${sysName[p.system_id]} ${n1(p.kwh)}`).join(' · ')) : null]
+          : missing ? h('span', { class: 'due-bad small' }, 'No reading') : h('span', { class: 'muted' }, '—')) : null,
+        showSolar ? h('td', { class: 'day-bar' }, share != null ? [h('div', { class: 'mini-bar' }, h('div', { class: low ? 'low' : '', style: `width:${Math.min(100, share * 100 / 1.3)}%` }), h('i', { style: 'left:76.9%' })),
+          h('span', { class: 'small ' + (low ? 'due-bad' : 'muted') }, Math.round(share * 100) + '%')] : null) : null,
+        imp.length ? h('td', { class: 'n nw' }, im ? [n1(im.daylight), h('div', { class: 'muted small' }, `${n1(im.day)} all day`)] : h('span', { class: 'muted' }, '—')) : null,
+        h('td', { class: 'day-events' }, ev.length ? ev.map(evNode) : null));
+    };
+    const dayTable = shown.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'day-table' },
+      h('thead', null, h('tr', null, h('th', null, 'Day'), showSolar ? h('th', { class: 'n' }, 'Solar units') : null, showSolar ? h('th', { class: 'day-bar' }, 'Against expected') : null,
+        imp.length ? h('th', { class: 'n' }, 'EB in daylight') : null, h('th', null, 'What happened'))),
+      h('tbody', null, shown.map(dayRow))))
+      : h('p', { class: 'empty' }, `Nothing recorded here in the last ${siteState.days} days. Meter readings appear once this site's solar or EB line is tracked; notes, tickets, tasks and bills appear as they are added.`);
+
+    // header figures
+    const lastGen = d3.max(solarGen, (g) => g.date);
+    const last7 = lastGen ? d3.range(7).map((k) => genByDay.get(addDays(lastGen, -k))).filter(Boolean) : [];
+    const avg7 = last7.length ? d3.mean(last7, (x) => x.total) : null;
+    const openTix = tix.filter((t) => t.status !== 'Closed');
+    const fig = (v, l, cls) => h('div', { class: 'fig' + (cls ? ' ' + cls : '') }, h('div', { class: 'v' }, v), h('div', { class: 'l' }, l));
+    const figs = h('section', { class: 'panel dash-strip' },
+      live.length ? fig(lastGen ? n1(genByDay.get(lastGen).total) : '—', lastGen ? `units on ${fmtDay(lastGen)}` : 'no readings in this period', lastGen && exp && genByDay.get(lastGen).total < 0.6 * exp ? 'low' : null) : null,
+      live.length ? fig(avg7 == null ? '—' : n1(avg7), `a day, last 7 readings${exp ? ' · expected ' + n0(exp) : ''}`, avg7 != null && exp && avg7 < 0.75 * exp ? 'mid' : null) : null,
+      fig(bills[0] ? rupees(bills[0].amount) : '—', bills[0] ? `${monthOf(bills[0])} bill · ${n0(billUnits(bills[0]))} units` : 'no bills entered'),
+      fig(String(openTix.filter((t) => t.type !== 'Setup').length), 'open tickets and tasks', openTix.some((t) => t.due && t.due < t0 && t.type !== 'Setup') ? 'low' : null));
+
+    const chart = h('div', { class: 'chart' });
+    if (hasMeter) requestAnimationFrame(() => siteChart(chart, daysDesc.slice().reverse(), genByDay, impByDay, exp, events));
+
+    // side panels
+    const c = capSum(solar);
+    const kv = (k, v) => (v ? h('div', { class: 'kv' }, h('span', { class: 'muted' }, k), h('span', null, v)) : null);
+    const details = h('section', { class: 'panel side-panel' }, h('h3', null, 'Details'),
+      kv('Type', site.site_type), kv('Address', site.address),
+      ...lines.flatMap((l) => [kv(lines.length > 1 ? `Consumer no. (${l.label})` : 'Consumer no.', l.service_no), kv('Sanctioned', l.sanctioned_kw != null ? l.sanctioned_kw + ' kW' : null), kv('Tariff', l.tariff),
+        kv('In charge', l.incharge), l.contact_phone ? h('div', { class: 'kv' }, h('span', { class: 'muted' }, 'Mobile'), h('a', { href: 'tel:' + l.contact_phone }, l.contact_phone)) : null]),
+      kv('Solar', capText(c)), kv('Extra items', site.extra_items),
+      site.notes ? h('p', { class: 'ctx-notes' }, site.notes) : null,
+      ...lines.filter((l) => l.notes).map((l) => h('p', { class: 'ctx-notes' }, l.notes)));
+    const openPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Open now'),
+      openTix.length ? h('ul', { class: 'plain queue' }, openTix.sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999'))).map((t) => h('li', null,
+        h('a', { href: '#ticket/' + t.id }, t.reason), h('div', { class: 'small ' + (t.due && t.due < t0 && t.type !== 'Setup' ? 'due-bad' : 'muted') },
+          `${t.type === 'Task' ? 'Task' : t.type === 'Setup' ? 'Question' : 'Ticket'}${t.due ? ' · due ' + fmtDay(t.due) + (t.due < t0 && t.type !== 'Setup' ? ', overdue' : '') : ''}${t.assigned_to ? ' · ' + t.assigned_to : ''}`))))
+        : h('p', { class: 'muted' }, 'Nothing open.'));
+    const billPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Last bills'),
+      bills.length ? h('div', { class: 'bill-row' }, bills.slice(0, 3).map((b) => h('button', { class: 'bill-mini' + (b.status === 'Submitted' ? ' wait' : b.status === 'Rejected' ? ' bad' : ''), onclick: () => billDetail(b) },
+        h('span', { class: 'd' }, monthOf(b)), h('span', { class: 'u' }, n0(billUnits(b)) + ' u'), h('span', { class: 'a' }, rupees(b.amount)))))
+        : h('p', { class: 'muted' }, 'No bills entered.'),
+      bills.length > 3 ? h('a', { class: 'small', href: '#bills' }, `All ${bills.length} bills`) : null);
+    const sysPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Solar systems'),
+      solar.length ? solar.map((x) => h('div', { class: 'ctx-sys' },
+        h('button', { class: 'link', onclick: () => editSystem(x) }, h('strong', null, `${x.id} ${x.system || ''}`)),
+        h('div', { class: 'small ' + (isFault(x) ? 'due-bad' : 'muted') }, x.tracking === 'Live' ? (isFault(x) ? x.attention : `Tracked via ${x.tracked_via} · expected ${n0(x.expected_kwh)} a day`) : x.tracking === 'Pending' ? 'Not tracked yet' : x.tracking),
+        x.notes ? h('div', { class: 'small muted' }, x.notes) : null)) : h('p', { class: 'muted' }, 'No solar system at this site.'));
+
+    const addNote = () => {
+      const date = input('sn-date', t0, { type: 'date', max: t0, required: true });
+      const body = h('textarea', { id: 'sn-body', required: true, placeholder: 'What happened? For example: electrician visited, inverter reset, panels cleaned, EB power cut 2 to 5 pm.' });
+      openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+        e.preventDefault();
+        if (!body.value.trim()) { body.focus(); return; }
+        await q(sb.from('solar_site_log').insert({ site_id: id, date: date.value, body: body.value.trim(), author: state.user.id, author_name: state.me.name }));
+        closeDialog(); toast('Note added'); route();
+      } },
+        h('div', { class: 'dlg-head' }, h('h2', null, 'Add a note · ' + site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+        h('div', { class: 'form-grid' }, field('Day', date), field('Note', body, 'wide')),
+        h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Add note'))));
+    };
+    const range = select('sp-range', String(siteState.days), [['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last 12 months']]);
+    range.addEventListener('change', () => { siteState.days = +range.value; route(); });
+    const fault = live.filter(isFault);
+
+    main.replaceChildren(...[
+      h('a', { class: 'back', href: '#overview' }, '← All sites'),
+      pageHead(site.name, [site.site_type, lines.map((l) => l.service_no).filter(Boolean).join(', '), capText(c)].filter(Boolean).join(' · ') || 'No details entered yet.',
+        canWrite() ? h('button', { class: 'btn primary', onclick: addNote }, 'Add a note') : null,
+        canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites, id, route) }, 'New task') : null,
+        canWrite() ? h('button', { class: 'btn', onclick: () => editSite(site, sites) }, 'Edit site') : null),
+      fault.length ? h('p', { class: 'site-alert' }, fault.map((x) => `${x.system || x.id}: ${x.attention}`).join(' · ')) : null,
+      figs,
+      h('div', { class: 'site-cols' },
+        h('div', { class: 'site-main' },
+          h('section', { class: 'panel' },
+            h('div', { class: 'sec-head' }, h('h2', null, 'Day by day'), field('Period', range)),
+            hasMeter ? h('p', { class: 'legend small' },
+              solarGen.length ? h('span', null, h('i', { class: 'sw sun' }), 'Solar units') : null, solarGen.length ? h('span', null, h('i', { class: 'sw bad' }), 'Under 60% of expected') : null,
+              exp ? h('span', null, h('i', { class: 'sw dash' }), 'Expected') : null, imp.length ? h('span', null, h('i', { class: 'sw grid' }), 'EB in daylight') : null,
+              h('span', null, h('i', { class: 'sw dot' }), 'Something happened')) : null,
+            hasMeter ? chart : null,
+            dayTable)),
+        h('aside', { class: 'site-side' }, openPanel, billPanel, sysPanel, details))].filter(Boolean));
+  }
+
+  function siteChart(box, days, genByDay, impByDay, exp, events) {
+    const W = Math.max(320, box.clientWidth || 640), H = 190, m = { t: 10, r: 8, b: 34, l: 38 };
+    const maxGen = d3.max(days, (d) => (genByDay.get(d) ? genByDay.get(d).total : 0)) || 0;
+    const maxImp = d3.max(days, (d) => (impByDay.get(d) ? impByDay.get(d).daylight : 0)) || 0;
+    const x = d3.scaleBand(days, [m.l, W - m.r]).padding(days.length > 120 ? 0.05 : 0.22);
+    const y = d3.scaleLinear([0, Math.max(maxGen, maxImp, exp || 0, 1) * 1.08], [H - m.b, m.t]).nice(4);
+    const svg = d3.create('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', 'Units each day');
+    svg.append('g').selectAll('line').data(y.ticks(4)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y).attr('y2', y).attr('stroke', 'var(--line)');
+    svg.append('g').selectAll('text').data(y.ticks(4)).join('text').attr('x', m.l - 6).attr('y', y).attr('dy', '.32em').attr('text-anchor', 'end').attr('font-size', 10).attr('fill', 'var(--muted)').text((d) => d3.format('~s')(d));
+    const low = (d) => { const t = genByDay.get(d).total; return t === 0 || (exp && t < 0.6 * exp); };
+    svg.append('g').selectAll('rect').data(days.filter((d) => genByDay.has(d))).join('rect')
+      .attr('x', (d) => x(d)).attr('width', x.bandwidth()).attr('rx', Math.min(2, x.bandwidth() / 3))
+      .attr('y', (d) => Math.min(y(genByDay.get(d).total), y(0) - 2)).attr('height', (d) => Math.max(2, y(0) - y(genByDay.get(d).total)))
+      .attr('fill', (d) => (low(d) ? 'var(--bad)' : 'var(--sun)'));
+    if (exp) svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y(exp)).attr('y2', y(exp)).attr('stroke', 'var(--ink)').attr('stroke-dasharray', '4 3').attr('stroke-opacity', 0.7);
+    const impDays = days.filter((d) => impByDay.has(d));
+    if (impDays.length) {
+      const line = d3.line().x((d) => x(d) + x.bandwidth() / 2).y((d) => y(impByDay.get(d).daylight));
+      svg.append('path').attr('d', line(impDays)).attr('fill', 'none').attr('stroke', 'var(--grid)').attr('stroke-width', 2);
+      if (impDays.length < 100) svg.append('g').selectAll('circle').data(impDays).join('circle').attr('cx', (d) => x(d) + x.bandwidth() / 2).attr('cy', (d) => y(impByDay.get(d).daylight)).attr('r', 2.5).attr('fill', 'var(--grid)');
+    }
+    svg.append('g').selectAll('circle').data(days.filter((d) => events.has(d))).join('circle')
+      .attr('cx', (d) => x(d) + x.bandwidth() / 2).attr('cy', H - m.b + 8).attr('r', Math.max(2, Math.min(3.5, x.bandwidth() / 2))).attr('fill', 'var(--ink)');
+    const step = Math.ceil(days.length / Math.max(2, Math.floor((W - m.l) / 70)));
+    svg.append('g').selectAll('text').data(days.filter((d, i) => (days.length - 1 - i) % step === 0)).join('text').attr('x', (d) => x(d) + x.bandwidth() / 2).attr('y', H - 6)
+      .attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', 'var(--muted)').text(fmtDay);
+    const tip = h('div', { class: 'tip', hidden: true });
+    svg.append('g').selectAll('rect').data(days).join('rect').attr('x', (d) => x(d) - x.step() * x.paddingInner() / 2).attr('width', x.step()).attr('y', m.t).attr('height', H - m.t - 4).attr('fill', 'transparent').style('cursor', 'pointer')
+      .on('mousemove', (ev, d) => {
+        const g = genByDay.get(d), im = impByDay.get(d), e = events.get(d) || [];
+        tip.replaceChildren(h('div', { class: 'muted' }, d3.utcFormat('%a %-d %b')(new Date(d + 'T00:00:00Z'))),
+          g ? h('div', null, `${n1(g.total)} solar units${exp ? ' · ' + Math.round((g.total / exp) * 100) + '% of expected' : ''}`) : null,
+          im ? h('div', null, `${n1(im.daylight)} EB units in daylight`) : null,
+          !g && !im ? h('div', null, 'No reading') : null,
+          ...e.slice(0, 3).map((v) => h('div', { class: 'muted' }, `${v.kind}: ${v.text.slice(0, 60)}`)));
+        tip.hidden = false;
+        const b = box.getBoundingClientRect();
+        tip.style.left = Math.min(Math.max(0, ev.clientX - b.left + 12), b.width - tip.offsetWidth) + 'px';
+        tip.style.top = Math.max(0, ev.clientY - b.top - tip.offsetHeight - 8) + 'px';
+      })
+      .on('mouseleave', () => { tip.hidden = true; })
+      .on('click', (ev, d) => {
+        const row = document.getElementById('day-' + d);
+        if (!row) return;
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+      });
+    box.replaceChildren(svg.node(), tip);
   }
 
   function spark(rows, lastDay) {
@@ -451,8 +705,8 @@
       h('tbody', null, sites.flatMap((site) => {
         const mine = conns.filter((c) => c.site_id === site.id && c.tracking !== 'Retired');
         if (!mine.length) return [];
-        if (mine.length === 1) return [h('tr', null, h('th', { class: 'conn' }, h('a', { href: '#sites/' + site.id }, site.name)), months.map((m) => cell(mine[0], m)))];
-        return [h('tr', { class: 'group' }, h('th', { colspan: months.length + 1 }, h('a', { href: '#sites/' + site.id }, site.name), h('span', { class: 'muted' }, ` · ${mine.length} EB lines`))),
+        if (mine.length === 1) return [h('tr', null, h('th', { class: 'conn' }, h('a', { href: '#site/' + site.id }, site.name)), months.map((m) => cell(mine[0], m)))];
+        return [h('tr', { class: 'group' }, h('th', { colspan: months.length + 1 }, h('a', { href: '#site/' + site.id }, site.name), h('span', { class: 'muted' }, ` · ${mine.length} EB lines`))),
           ...mine.map((c) => h('tr', null, h('th', { class: 'conn sub' }, c.label), months.map((m) => cell(c, m))))];
       }))));
 
@@ -573,7 +827,7 @@
         yearAgo ? h('p', null, `Same bill last year: ${n0(units(yearAgo))} units, ₹${d3.format(',.0f')(yearAgo.amount)}${pct(change(units(b), units(yearAgo)))} on units.`) : null,
         earlier.length ? h('p', { class: 'muted' }, 'Recent: ' + earlier.slice(0, 6).map((x) => `${d3.utcFormat('%b %y')(new Date(x.period_to || x.bill_date))} ${n0(units(x))}`).join(' · ')) : null),
       ctxBlock('Site', site ? [
-        h('p', null, h('a', { href: '#sites/' + site.id, onclick: closeDialog }, site.name), site.site_type ? ` · ${site.site_type}` : ''),
+        h('p', null, h('a', { href: '#site/' + site.id, onclick: closeDialog }, site.name), site.site_type ? ` · ${site.site_type}` : ''),
         conn ? h('p', null, [conn.service_no && 'Consumer no. ' + conn.service_no, conn.sanctioned_kw != null ? conn.sanctioned_kw + ' kW sanctioned' : null].filter(Boolean).join(' · ')) : null,
         conn && (conn.incharge || conn.contact_phone) ? h('p', null, `In charge: ${[conn.incharge, conn.contact_phone].filter(Boolean).join(', ')}`) : null,
         conn && conn.notes ? h('p', { class: 'ctx-notes' }, conn.notes) : null,
@@ -639,7 +893,7 @@
       live.length ? h('div', { class: 'cards' }, live.map(card)) : h('p', { class: 'panel empty' }, 'No EB line is set to Live tracking yet.'),
       notLive.length ? h('section', null, h('h2', null, `Not tracked yet · ${notLive.length}`),
         h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, notLive.map((c) => h('li', null,
-          h('a', { href: '#sites/' + c.site_id }, `${siteName[c.site_id] || c.site_id} · ${c.label}`), h('span', { class: 'muted' }, ` · ${c.code} · ${c.tracked_via}`)))))) : null].filter(Boolean));
+          h('a', { href: '#site/' + c.site_id }, `${siteName[c.site_id] || c.site_id} · ${c.label}`), h('span', { class: 'muted' }, ` · ${c.code} · ${c.tracked_via}`)))))) : null].filter(Boolean));
   }
 
   function importChart(box, mine, days, target) {
@@ -717,7 +971,7 @@
       const line = (label, items) => h('div', { class: 'sc-line' }, h('span', { class: 'sc-k' }, label), items);
       return h('article', { class: 'site-card', id: 'site-' + site.id },
         h('div', { class: 'sc-head' },
-          h('h3', null, site.name),
+          h('h3', null, h('a', { href: '#site/' + site.id }, site.name)),
           w ? h('button', { class: 'link small', onclick: () => editSite(site, sites) }, 'Edit') : null),
         site.address ? h('p', { class: 'muted sc-addr' }, site.address) : null,
         cap ? h('p', { class: 'site-cap' }, cap) : null,
@@ -845,7 +1099,7 @@
       const groups = sites.map((site) => ({ site, rows: shown.filter((x) => x.site_id === site.id) })).filter((g) => g.rows.length);
       body.replaceChildren(...(groups.length ? groups.map((g) => h('section', { class: 'sysx-group' },
         h('div', { class: 'sysx-head' },
-          h('h3', null, h('a', { href: '#sites/' + g.site.id }, g.site.name)),
+          h('h3', null, h('a', { href: '#site/' + g.site.id }, g.site.name)),
           g.site.site_type ? h('span', { class: 'chip' }, g.site.site_type) : null,
           h('span', { class: 'muted' }, capText(capSum(g.rows.filter((x) => x.tracking !== 'Retired'))))),
         h('div', { class: 'panel sysx-list' }, g.rows.map(row)))) : [h('p', { class: 'empty' }, 'No systems match.')]));
@@ -1069,7 +1323,7 @@
       body.replaceChildren(h('table', { class: 'site-table' },
         h('thead', null, head),
         h('tbody', null, list.map((r) => h('tr', null,
-          h('td', { class: 'st-name' }, h('a', { href: '#sites/' + r.site.id }, r.site.name),
+          h('td', { class: 'st-name' }, h('a', { href: '#site/' + r.site.id }, r.site.name),
             r.problems.length ? h('div', { class: 'due-bad small' }, r.problems.map((x) => `${x.id}: ${x.attention}`).join('; ')) : null),
           h('td', null, r.site.site_type || h('span', { class: 'muted' }, '—')),
           h('td', { class: 'nw' }, r.lines.length ? r.lines.flatMap((l, i) => [i ? h('br') : '', l.service_no || h('span', { class: 'due-bad' }, 'missing')]) : h('span', { class: 'muted' }, 'no EB line')),
