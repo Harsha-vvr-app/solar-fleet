@@ -396,3 +396,15 @@ td.day-events { width: 55%; }
   td.day-events { width: auto; min-width: 190px; }
   .dash-strip { gap: 12px 22px; }
 }
+
+/* bill payment */
+.bill-chip.unpaid { border-style: dashed; border-width: 2px; padding: 2px 7px; }
+.due-bad { color: var(--bad); font-weight: 600; }
+.due-soon { color: var(--sun-ink, var(--ink)); font-weight: 600; }
+.pay-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 12px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); }
+.pay-row.paid { border-color: var(--ok); background: var(--ok-soft); }
+.pay-row.overdue { border-color: var(--bad); background: var(--bad-soft); }
+.pay-row.soon { border-color: var(--sun); background: var(--sun-soft); }
+.pay-row .pay-act { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
+.pay-row .pay-act input { width: auto; }
+.setup-why { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.4; }

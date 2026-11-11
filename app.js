@@ -102,11 +102,12 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, setup };
+  const SETUP_PAGES = ['sites', 'grid', 'planned', 'bulk', 'settings', 'users'];
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
-    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : name)));
+    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : SETUP_PAGES.includes(name) ? 'setup' : name)));
     if (name !== 'sites') window.scrollTo(0, 0);
     document.querySelectorAll('.side a[aria-current]').forEach((a) => a.setAttribute('aria-current', 'page'));
     main.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
@@ -114,6 +115,20 @@
     main.focus({ preventScroll: true });
   }
   window.addEventListener('hashchange', () => state.me && route());
+
+  /* ---------- setup: the pages needed now and then ---------- */
+  function setup() {
+    const items = [
+      ['#sites', 'Sites and EB connections', 'Add a site, an EB connection or a solar system, and edit their details.'],
+      ['#grid', 'Daylight grid import', 'Units each metered EB line takes during the day. Fills in once EB meters are fitted.'],
+      ['#planned', 'Planned work', 'Tell the nightly checks about planned shutdowns so they raise no fault tickets.'],
+      ['#bulk', 'Bulk upload', 'Add or update sites, EB connections, systems and tasks from one Excel file.'],
+      ['#settings', 'Settings', 'The rules behind the nightly checks and ticket deadlines.'],
+      ['#users', 'Users', 'Who can sign in to Solar Fleet.'],
+    ];
+    main.replaceChildren(pageHead('Setup', 'Pages you only need now and then.'),
+      h('div', { class: 'dash-grid' }, items.map(([href, t, d]) => h('a', { class: 'dash-card', href }, h('div', { class: 'dc-head' }, h('h3', null, t)), h('p', { class: 'setup-why' }, d)))));
+  }
 
   /* ---------- dashboard: every site at a glance ---------- */
   const dashState = { q: '', type: '' };
@@ -123,6 +138,9 @@
   const rupees = (v) => (v == null || v === '' ? '—' : '₹' + Math.round(+v).toLocaleString('en-IN'));
   const billUnits = (b) => (b ? +(b.billed_kwh ?? b.import_kwh) : null);
   const monthOf = (b) => d3.utcFormat('%b %y')(new Date((b.period_to || b.bill_date || b.uploaded_at).slice(0, 10) + 'T00:00:00Z'));
+  // payment state of a bill: paid, overdue, soon (due within a week), unpaid, or none (rejected)
+  const payState = (b) => (b.status === 'Rejected' ? 'none' : b.paid ? 'paid' : b.due_date && b.due_date < today() ? 'overdue' : b.due_date && b.due_date <= addDays(today(), 7) ? 'soon' : 'unpaid');
+  const isUnpaid = (b) => ['overdue', 'soon', 'unpaid'].includes(payState(b));
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
   async function overview() {
@@ -154,16 +172,20 @@
       const tasks = tix.filter((t) => t.type === 'Task');
       const bills = billsAll.filter((b) => b.site_id === site.id);
       const waiting = bills.filter((b) => b.status === 'Submitted');
+      const unpaid = bills.filter(isUnpaid).sort((a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
+      const billLate = unpaid.find((b) => payState(b) === 'overdue'), billSoon = unpaid.find((b) => payState(b) === 'soon');
       const kw = d3.sum(sys, (x) => cap(x).inv);
       let level, label, why;
       if (faults.length) { level = 'bad'; label = 'Fault'; why = faults.map((x) => `${x.system || x.id}: ${x.attention}`).join('; '); }
       else if (overdue.length) { level = 'bad'; label = 'Overdue'; why = `${overdue[0].reason}, due ${fmtDay(overdue[0].due)}${overdue.length > 1 ? ` (+${overdue.length - 1} more)` : ''}`; }
+      else if (billLate) { level = 'bad'; label = 'Bill overdue'; why = `${monthOf(billLate)} bill of ${rupees(billLate.amount)} was due ${fmtDay(billLate.due_date)} and is not marked paid`; }
       else if (issues.length) { level = 'warn'; label = 'Open issue'; why = issues[0].reason + (issues.length > 1 ? ` (+${issues.length - 1} more)` : ''); }
+      else if (billSoon) { level = 'warn'; label = 'Bill due'; why = `${monthOf(billSoon)} bill of ${rupees(billSoon.amount)} is due ${fmtDay(billSoon.due_date)}`; }
       else if (waiting.length) { level = 'warn'; label = 'Bill to approve'; why = `${monthOf(waiting[0])} bill, ${rupees(waiting[0].amount)}`; }
       else if (tasks.length) { level = 'warn'; label = 'Task open'; why = `${tasks[0].reason}${tasks[0].due ? ', due ' + fmtDay(tasks[0].due) : ''}`; }
       else if (live.length) { level = 'ok'; label = 'OK'; why = 'Working normally'; }
       else { level = 'idle'; label = sys.length ? 'Not tracked' : 'No solar'; why = sys.length ? 'Solar here is not sending readings yet' : 'EB connection only'; }
-      return { site, sys, live, byDay, siteLast, made, exp, faults, overdue, issues, tasks, bills, waiting, kw, level, label, why };
+      return { site, sys, live, byDay, siteLast, made, exp, faults, overdue, issues, tasks, bills, waiting, unpaid, kw, level, label, why };
     });
 
     const draw = () => {
@@ -191,7 +213,7 @@
           h('div', { class: 'spark' }, spark(c.byDay, lastDay)))
           : h('p', { class: 'muted dc-nosolar' }, c.sys.length ? `${c.kw ? n0(c.kw) + ' kW solar' : 'Solar'}, not tracked yet` : 'No solar system'),
         h('div', { class: 'dc-foot' },
-          h('span', null, latest ? [h('span', { class: 'muted' }, `${monthOf(latest)} bill `), rupees(latest.amount),
+          h('span', null, latest ? [h('span', { class: 'muted' }, `${monthOf(latest)} bill `), rupees(latest.amount), isUnpaid(latest) ? h('span', { class: payState(latest) === 'overdue' ? 'due-bad' : 'muted' }, ' unpaid') : null,
             change != null && Math.abs(change) >= 10 ? h('span', { class: change > 0 ? 'due-bad' : 'good-text' }, ` ${change > 0 ? '+' : ''}${change}%`) : null] : h('span', { class: 'muted' }, 'No bill yet')),
           h('span', { class: c.overdue.length ? 'due-bad' : 'muted' }, openBits.join(' · ') || 'Nothing open')));
     };
@@ -204,6 +226,7 @@
     const exp = d3.sum(fresh, (x) => +x.expected_kwh || 0);
     const overdueAll = open.filter((t) => t.due && t.due < t0 && t.type !== 'Setup').length;
     const waitingBills = billsAll.filter((b) => b.status === 'Submitted');
+    const toPay = billsAll.filter(isUnpaid);
     const liveLines = lines.filter((l) => l.tracking === 'Live').length, allLines = lines.filter((l) => l.tracking !== 'Retired').length;
     const fig = (v, l, cls, href) => h(href ? 'a' : 'div', { class: 'fig' + (cls ? ' ' + cls : ''), href }, h('div', { class: 'v' }, v), h('div', { class: 'l' }, l));
     const nBad = cards.filter((c) => c.level === 'bad').length;
@@ -213,7 +236,7 @@
       fig(String(waitingBills.length), isOwner() ? 'bills for you to approve' : 'bills awaiting approval', waitingBills.length ? 'mid' : null, '#bills'),
       fig(n0(made), `units on ${fmtDay(lastDay)}${exp ? ' · expected ' + n0(exp) : ''}`, exp && made < 0.75 * exp ? 'low' : null),
       fig(`${tracked.length}/${allSys.length}`, 'solar systems tracked', null, '#systems'),
-      fig(`${liveLines}/${allLines}`, 'EB lines metered', null, '#grid'));
+      fig(String(toPay.length), `bills to pay${toPay.length ? ' · ' + rupees(d3.sum(toPay, (b) => +b.amount || 0)) : ''}`, toPay.some((b) => payState(b) === 'overdue') ? 'low' : null, '#bills'));
 
     const queue = waitingBills.length ? h('section', null, h('h2', null, isOwner() ? 'Bills waiting for your approval' : 'Bills waiting for approval'),
       h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, waitingBills.map((b) => h('li', null,
@@ -281,7 +304,8 @@
     notes.forEach((n) => add(istDate(n.created_at), { kind: 'Ticket note', cls: 'note', text: `${n.body}${n.author_name ? ' (' + n.author_name + ')' : ''}`, href: '#ticket/' + n.ticket_id }));
     log.forEach((n) => add(n.date, { kind: 'Note', cls: 'note', text: n.body, by: n.author_name, log: n }));
     bills.forEach((b) => {
-      add(b.period_to || b.bill_date, { kind: 'EB bill', cls: 'bill', text: `${n0(billUnits(b))} units · ${rupees(b.amount)}${b.status === 'Submitted' ? ' · awaiting approval' : ''}`, bill: b });
+      add(b.period_to || b.bill_date, { kind: 'EB bill', cls: 'bill', text: `${n0(billUnits(b))} units · ${rupees(b.amount)}${b.status === 'Submitted' ? ' · awaiting approval' : ''}${isUnpaid(b) && b.due_date ? ' · due ' + fmtDay(b.due_date) : ''}`, bill: b });
+      if (b.paid && b.paid_on) add(b.paid_on, { kind: 'Bill paid', cls: 'ok', text: `${monthOf(b)} bill · ${rupees(b.amount)}`, bill: b });
       if (b.reviewed_at && b.status !== 'Submitted') add(istDate(b.reviewed_at), { kind: 'Bill ' + b.status.toLowerCase(), cls: b.status === 'Approved' ? 'ok' : 'bad', text: `${monthOf(b)} bill${b.review_note ? ': ' + b.review_note : ''}`, bill: b });
     });
     planned.forEach((p) => add(p.from_date < from ? from : p.from_date, { kind: 'Planned work', cls: 'task', text: `${sysName[p.system_id] || ''}: ${p.reason || ''} (${fmtDay(p.from_date)} to ${fmtDay(p.to_date)})` }));
@@ -338,7 +362,7 @@
     const figs = h('section', { class: 'panel dash-strip' },
       live.length ? fig(lastGen ? n1(genByDay.get(lastGen).total) : '—', lastGen ? `units on ${fmtDay(lastGen)}` : 'no readings in this period', lastGen && exp && genByDay.get(lastGen).total < 0.6 * exp ? 'low' : null) : null,
       live.length ? fig(avg7 == null ? '—' : n1(avg7), `a day, last 7 readings${exp ? ' · expected ' + n0(exp) : ''}`, avg7 != null && exp && avg7 < 0.75 * exp ? 'mid' : null) : null,
-      fig(bills[0] ? rupees(bills[0].amount) : '—', bills[0] ? `${monthOf(bills[0])} bill · ${n0(billUnits(bills[0]))} units` : 'no bills entered'),
+      fig(bills[0] ? rupees(bills[0].amount) : '—', bills[0] ? `${monthOf(bills[0])} bill · ${n0(billUnits(bills[0]))} units${isUnpaid(bills[0]) ? (bills[0].due_date ? ' · due ' + fmtDay(bills[0].due_date) : '') + ', not paid' : ''}` : 'no bills entered', bills[0] && payState(bills[0]) === 'overdue' ? 'low' : null),
       fig(String(openTix.filter((t) => t.type !== 'Setup').length), 'open tickets and tasks', openTix.some((t) => t.due && t.due < t0 && t.type !== 'Setup') ? 'low' : null));
 
     const chart = h('div', { class: 'chart' });
@@ -361,7 +385,7 @@
         : h('p', { class: 'muted' }, 'Nothing open.'));
     const billPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Last bills'),
       bills.length ? h('div', { class: 'bill-row' }, bills.slice(0, 3).map((b) => h('button', { class: 'bill-mini' + (b.status === 'Submitted' ? ' wait' : b.status === 'Rejected' ? ' bad' : ''), onclick: () => billDetail(b) },
-        h('span', { class: 'd' }, monthOf(b)), h('span', { class: 'u' }, n0(billUnits(b)) + ' u'), h('span', { class: 'a' }, rupees(b.amount)))))
+        h('span', { class: 'd' }, monthOf(b) + (isUnpaid(b) ? ' · unpaid' : '')), h('span', { class: 'u' }, n0(billUnits(b)) + ' u'), h('span', { class: 'a' }, rupees(b.amount)))))
         : h('p', { class: 'muted' }, 'No bills entered.'),
       bills.length > 3 ? h('a', { class: 'small', href: '#bills' }, `All ${bills.length} bills`) : null);
     const sysPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Solar systems'),
@@ -688,6 +712,7 @@
     const mLabel = (m) => d3.utcFormat('%b %y')(new Date(m + '-01T00:00:00Z'));
     const waiting = list.filter((b) => b.status === 'Submitted');
     const unassigned = list.filter((b) => !b.eb_connection_id);
+    const toPay = list.filter(isUnpaid).sort((a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
 
     const cell = (c, m) => {
       const here = list.filter((b) => b.eb_connection_id === c.id && billMonth(b) === m);
@@ -696,8 +721,8 @@
           ? h('button', { class: 'cell-add', 'aria-label': `Upload the ${mLabel(m)} bill for ${c.label}`, onclick: () => uploadBill(sitesData, c.site_id, c.id, m) }, '+') : '');
       }
       return h('td', { class: 'bill-cell' }, here.map((b) => h('button', {
-        class: 'bill-chip ' + (b.status === 'Approved' ? 'ok' : b.status === 'Rejected' ? 'bad' : 'wait'), onclick: () => billDetail(b),
-        title: `${b.site} · ${b.status === 'Submitted' ? 'awaiting approval' : b.status.toLowerCase()}` },
+        class: 'bill-chip ' + (b.status === 'Approved' ? 'ok' : b.status === 'Rejected' ? 'bad' : 'wait') + (isUnpaid(b) ? ' unpaid' : ''), onclick: () => billDetail(b),
+        title: `${b.site} · ${b.status === 'Submitted' ? 'awaiting approval' : b.status.toLowerCase()}${isUnpaid(b) ? ' · not paid' + (b.due_date ? ', due ' + fmtDay(b.due_date) : '') : b.paid ? ' · paid' : ''}` },
         h('span', { class: 'u' }, n0(b.billed_kwh ?? b.import_kwh)), h('span', { class: 'a' }, b.amount == null ? '' : '₹' + d3.format('.3~s')(b.amount)))));
     };
     const grid = h('div', { class: 'table-wrap' }, h('table', { class: 'bill-grid' },
@@ -722,8 +747,14 @@
       pageHead('EB bills', 'One row per EB connection, one column per month. Click a blank cell to upload that month\'s bill; click a bill to open or approve it.',
         canWrite() ? h('button', { class: 'btn primary', onclick: () => uploadBill(sitesData) }, 'Upload a bill') : null),
       waiting.length ? h('section', null, h('h2', null, isOwner() ? 'Waiting for your approval' : 'Waiting for approval'), h('div', { class: 'panel' }, plainTable(waiting))) : null,
+      toPay.length ? h('section', null, h('h2', null, `To pay · ${plural(toPay.length, 'bill')} · ${rupees(d3.sum(toPay, (b) => +b.amount || 0))}`), h('div', { class: 'panel' }, h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, ['Site', 'Bill', 'Amount', 'Due', ''].map((c, i) => h('th', { class: i === 2 ? 'n' : null }, c)))),
+        h('tbody', null, toPay.map((b) => h('tr', null,
+          h('td', null, b.site), h('td', null, monthOf(b) + (b.status === 'Submitted' ? ' · awaiting approval' : '')), h('td', { class: 'n' }, rupees(b.amount)),
+          h('td', null, b.due_date ? h('span', { class: payState(b) === 'overdue' ? 'due-bad' : payState(b) === 'soon' ? 'due-soon' : null }, fmtDate(b.due_date) + (payState(b) === 'overdue' ? ' · overdue' : '')) : '—'),
+          h('td', null, h('button', { class: 'link', onclick: () => billDetail(b) }, canWrite() ? 'Open to mark paid' : 'Open'))))))))) : null,
       h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Last 12 months'),
-        h('p', { class: 'legend' }, h('span', { class: 'bill-chip ok' }, 'Approved'), h('span', { class: 'bill-chip wait' }, 'Awaiting approval'), h('span', { class: 'bill-chip bad' }, 'Rejected'))),
+        h('p', { class: 'legend' }, h('span', { class: 'bill-chip ok' }, 'Approved'), h('span', { class: 'bill-chip wait' }, 'Awaiting approval'), h('span', { class: 'bill-chip bad' }, 'Rejected'), h('span', { class: 'bill-chip ok unpaid' }, 'Not paid yet'))),
         h('p', { class: 'muted' }, 'Bills are filed under the month their period ends. TNEB bills most connections every two months, so a blank month between two bills is normal.'),
         h('div', { class: 'panel' }, grid)),
       unassigned.length ? h('section', null, h('h2', null, 'Bills not linked to an EB connection'), h('div', { class: 'panel' }, plainTable(unassigned))) : null].filter(Boolean));
@@ -748,11 +779,17 @@
       from: input('bl-from', '', { type: 'date' }), to: input('bl-to', '', { type: 'date' }),
       imp: input('bl-imp', '', { type: 'number', step: 'any', min: 0 }), exp: input('bl-exp', '', { type: 'number', step: 'any', min: 0 }),
       billed: input('bl-billed', '', { type: 'number', step: 'any', min: 0 }), amount: input('bl-amount', '', { type: 'number', step: 'any', min: 0 }),
+      due: input('bl-due', presetMonth ? addDays(presetMonth + '-01', 20) : '', { type: 'date' }),
       file: input('bl-file', '', { type: 'file', accept: 'application/pdf,image/*', required: true }),
       notes: h('textarea', { id: 'bl-notes' }),
     };
     conn.addEventListener('change', () => { const c = conns.find((x) => String(x.id) === conn.value); if (c && c.service_no && !f.service.value) f.service.value = c.service_no; });
     if (presetSite) setTimeout(fillConns);
+    // TNEB bills fall due 20 days after the bill date; fill it in unless the admin has typed a date
+    let dueTyped = false;
+    f.due.addEventListener('input', () => { dueTyped = true; });
+    const autoDue = () => { const base = f.billDate.value || f.to.value; if (!dueTyped && base) f.due.value = addDays(base, 20); };
+    f.billDate.addEventListener('change', autoDue); f.to.addEventListener('change', autoDue);
     const btn = h('button', { class: 'btn primary', type: 'submit' }, 'Submit for approval');
     const num = (el) => (el.value === '' ? null : +el.value);
     const form = h('form', { class: 'dlg', onsubmit: async (e) => {
@@ -771,7 +808,7 @@
           site_id: sys.value, eb_connection_id: c ? c.id : null,
           site: site.name + (c ? ' · ' + c.label : ''), service_no: f.service.value.trim() || null,
           bill_date: f.billDate.value || null, period_from: f.from.value || null, period_to: f.to.value || null,
-          import_kwh: num(f.imp), export_kwh: num(f.exp), billed_kwh: num(f.billed), amount: num(f.amount),
+          import_kwh: num(f.imp), export_kwh: num(f.exp), billed_kwh: num(f.billed), amount: num(f.amount), due_date: f.due.value || null,
           file_path: path, file_name: file.name, notes: f.notes.value.trim() || null,
           uploaded_by: state.user.id, uploaded_by_name: state.me.name }));
         closeDialog(); toast('Bill submitted for approval'); refreshCounts(); route();
@@ -782,10 +819,10 @@
       h('div', { class: 'dlg-head' }, h('h2', null, 'Upload an EB bill'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
       h('p', { class: 'muted' }, 'Copy the figures from the bill so they can be compared with the meters. Leave any you can\'t find blank.'),
       h('div', { class: 'form-grid' },
-        field('Site', sys), field('EB connection', conn), field('Service number', f.service), field('Bill date', f.billDate),
+        field('Site', sys), field('EB connection', conn), field('Consumer number', f.service), field('Bill date', f.billDate),
         field('Period from', f.from), field('Period to', f.to),
         field('Units imported (kWh)', f.imp), field('Units exported (kWh)', f.exp),
-        field('Units billed (kWh)', f.billed), field('Amount (₹)', f.amount),
+        field('Units billed (kWh)', f.billed), field('Amount (₹)', f.amount), field('Pay by (due date)', f.due),
         field('Bill file (PDF or photo)', f.file, 'wide'), field('Notes', f.notes, 'wide')),
       h('div', { class: 'actions' }, btn));
     openDialog(form);
@@ -845,6 +882,17 @@
       closeDialog(); toast(status === 'Approved' ? 'Bill approved' : 'Bill rejected'); refreshCounts(); route();
     };
     const kv = (k, v) => h('div', { class: 'field' }, h('label', null, k), h('div', { class: 'num' }, v));
+    const ps = payState(b);
+    const payDate = input('bd-paid', today(), { type: 'date', max: today() });
+    const setPaid = async (paid) => {
+      await q(sb.from('solar_eb_bills').update(paid ? { paid: true, paid_on: payDate.value || today(), paid_by_name: state.me.name } : { paid: false }).eq('id', b.id));
+      closeDialog(); toast(paid ? 'Marked as paid' : 'Marked as not paid'); route();
+    };
+    const payRow = ps === 'none' ? null : h('div', { class: 'pay-row ' + ps }, b.paid
+      ? [h('strong', null, `Paid${b.paid_on ? ' on ' + fmtDate(b.paid_on) : ''}`), b.paid_by_name ? h('span', { class: 'muted' }, `marked by ${b.paid_by_name}`) : null,
+        canWrite() ? h('button', { class: 'link', onclick: () => setPaid(false) }, 'Mark as not paid') : null]
+      : [h('strong', null, b.due_date ? `${ps === 'overdue' ? 'Not paid. Was due' : 'Not paid yet. Due'} ${fmtDate(b.due_date)}` : 'Not paid yet'),
+        canWrite() ? h('span', { class: 'pay-act' }, h('label', { for: 'bd-paid', class: 'muted' }, 'Paid on'), payDate, h('button', { class: 'btn', onclick: () => setPaid(true) }, 'Mark as paid')) : null]);
     openDialog(h('div', { class: 'dlg' },
       h('div', { class: 'dlg-head' }, h('h2', null, title), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
       h('div', { class: 'form-grid' },
@@ -854,6 +902,7 @@
         kv('Amount', b.amount == null ? '—' : '₹' + d3.format(',.0f')(b.amount)),
         kv('Uploaded', `${b.uploaded_by_name || ''} · ${d3.timeFormat('%-d %b %Y')(new Date(b.uploaded_at))}`),
         kv('Status', b.status === 'Submitted' ? 'Awaiting approval' : b.status)),
+      payRow,
       b.notes ? h('p', null, b.notes) : null,
       link ? h('p', null, h('a', { href: link, target: '_blank', rel: 'noopener' }, 'Open the bill file')) : h('p', { class: 'muted' }, 'No file attached.'),
       context,
@@ -1277,7 +1326,7 @@
     const [{ sites, conns }, systemsList, billsAll, open] = await Promise.all([
       loadSites(),
       q(sb.from('solar_system_status').select('*').order('sort')),
-      q(sb.from('solar_eb_bills').select('id, site_id, eb_connection_id, period_to, bill_date, billed_kwh, import_kwh, export_kwh, amount, status, review_note, site, service_no, period_from, notes, uploaded_at, uploaded_by_name, file_path')
+      q(sb.from('solar_eb_bills').select('*')
         .order('period_to', { ascending: false, nullsFirst: false })),
       q(sb.from('solar_tickets').select('id, site_id, type, due, reason').neq('status', 'Closed')),
     ]);
@@ -1304,7 +1353,7 @@
     const body = h('div', { class: 'table-wrap' });
     const fmtBill = (b) => b ? h('button', { class: 'bill-mini' + (b.status === 'Submitted' ? ' wait' : b.status === 'Rejected' ? ' bad' : ''), onclick: () => billDetail(b),
       title: b.status === 'Submitted' ? 'Awaiting approval' : b.status },
-      h('span', { class: 'd' }, d3.utcFormat('%b %y')(new Date(b.period_to || b.bill_date))),
+      h('span', { class: 'd' }, d3.utcFormat('%b %y')(new Date(b.period_to || b.bill_date)) + (isUnpaid(b) ? ' · unpaid' : '')),
       h('span', { class: 'u' }, n0(units(b)) + ' u'), h('span', { class: 'a' }, b.amount == null ? '' : '₹' + d3.format(',.0f')(b.amount))) : h('span', { class: 'muted' }, '—');
     const cols = [
       ['Site', 'name'], ['Type', 'type'], ['Consumer no.', null], ['Sanctioned', 'sanctioned'], ['In charge', null], ['Solar', 'solar'],
