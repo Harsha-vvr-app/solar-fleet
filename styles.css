@@ -419,3 +419,5 @@ td.day-events { width: 55%; }
 .btn.small { padding: 3px 10px; font-size: .82rem; }
 .queue li { position: relative; }
 .queue .q-close { float: right; margin-left: 8px; }
+.gap-note { margin: 4px 0 10px; }
+.site-main { display: grid; gap: 16px; align-content: start; min-width: 0; }

@@ -400,6 +400,16 @@
       fig(String(openTix.filter((t) => t.type !== 'Setup').length), only ? 'open complaints and tasks' : 'open tickets and tasks', openTix.some((t) => t.due && t.due < t0 && t.type !== 'Setup') ? 'low' : null));
 
     const chart = h('div', { class: 'chart' });
+    const billBars = bills.filter((b) => b.status !== 'Rejected' && billUnits(b) != null).slice(0, 12).reverse();
+    const billBox = h('div', { class: 'chart' });
+    if (billBars.length) requestAnimationFrame(() => billChart(billBox, billBars));
+    const billSection = !only && billBars.length ? h('section', { class: 'panel' },
+      h('div', { class: 'sec-head' }, h('h2', null, 'EB units used, bill by bill'), h('p', { class: 'muted small' }, billBars.length > 1 ? `Last ${billBars.length} bills · click a bar to open the bill` : 'Click the bar to open the bill')),
+      billBox) : null;
+    // say plainly what is missing, so an empty chart is never a puzzle
+    const gaps = only ? [] : [
+      solar.length && !solarGen.length ? (live.length ? `No solar readings have arrived in the last ${siteState.days} days.` : 'Solar here is not tracked yet, so there is no daily solar chart.') : null,
+      lines.length && !imp.length ? 'Daily EB use will show here once this line has a smart meter. Until then, EB use is shown bill by bill below.' : null].filter(Boolean);
     if (hasMeter) requestAnimationFrame(() => siteChart(chart, daysDesc.slice().reverse(), genByDay, impByDay, exp, events));
 
     // side panels
@@ -492,8 +502,32 @@
               exp ? h('span', null, h('i', { class: 'sw dash' }), 'Expected') : null, imp.length ? h('span', null, h('i', { class: 'sw grid' }), 'EB in daylight') : null,
               h('span', null, h('i', { class: 'sw dot' }), 'Something happened')) : null,
             hasMeter ? chart : null,
-            dayTable)),
+            gaps.length ? h('p', { class: 'muted small gap-note' }, gaps.join(' ')) : null,
+            dayTable),
+          billSection),
         h('aside', { class: 'site-side' }, ...(only ? [openPanel, historyPanel, onePanel] : [openPanel, billPanel, details])))].filter(Boolean));
+  }
+
+  // EB units on each bill, oldest to newest; click a bar to open the bill
+  function billChart(box, list) {
+    const W = Math.max(320, box.clientWidth || 640), H = 200, m = { t: 22, r: 8, b: 34, l: 44 };
+    const x = d3.scaleBand(list.map((b) => b.id), [m.l, W - m.r]).padding(0.3);
+    const y = d3.scaleLinear([0, (d3.max(list, billUnits) || 1) * 1.1], [H - m.b, m.t]).nice(4);
+    const svg = d3.create('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', 'EB units on each bill');
+    svg.append('g').selectAll('line').data(y.ticks(4)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y).attr('y2', y).attr('stroke', 'var(--line)');
+    svg.append('g').selectAll('text').data(y.ticks(4)).join('text').attr('x', m.l - 6).attr('y', y).attr('dy', '.32em').attr('text-anchor', 'end').attr('font-size', 10).attr('fill', 'var(--muted)').text((d) => d3.format(',')(d));
+    const bw = Math.min(x.bandwidth(), 56), off = (x.bandwidth() - bw) / 2;
+    svg.append('g').selectAll('rect').data(list).join('rect').attr('x', (b) => x(b.id) + off).attr('width', bw).attr('rx', 2)
+      .attr('y', (b) => Math.min(y(billUnits(b) || 0), y(0) - 2)).attr('height', (b) => Math.max(2, y(0) - y(billUnits(b) || 0)))
+      .attr('fill', 'var(--grid)').style('cursor', 'pointer').on('click', (ev, b) => billDetail(b))
+      .append('title').text((b) => `${monthOf(b)} · ${n0(billUnits(b))} units · ${rupees(b.amount)}`);
+    if (x.bandwidth() > 34) svg.append('g').selectAll('text').data(list).join('text').attr('x', (b) => x(b.id) + x.bandwidth() / 2).attr('y', (b) => y(billUnits(b) || 0) - 5)
+      .attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', 'var(--ink)').text((b) => n0(billUnits(b)));
+    svg.append('g').selectAll('text').data(list).join('text').attr('x', (b) => x(b.id) + x.bandwidth() / 2).attr('y', H - m.b + 14)
+      .attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', 'var(--muted)').text(monthOf);
+    if (x.bandwidth() > 44) svg.append('g').selectAll('text').data(list).join('text').attr('x', (b) => x(b.id) + x.bandwidth() / 2).attr('y', H - m.b + 27)
+      .attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', 'var(--muted)').text((b) => rupees(b.amount));
+    box.replaceChildren(svg.node());
   }
 
   function siteChart(box, days, genByDay, impByDay, exp, events) {
