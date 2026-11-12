@@ -102,12 +102,12 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, setup };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, system: systemPage, setup };
   const SETUP_PAGES = ['sites', 'grid', 'planned', 'bulk', 'settings', 'users'];
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
-    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : SETUP_PAGES.includes(name) ? 'setup' : name)));
+    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : name === 'system' ? 'systems' : SETUP_PAGES.includes(name) ? 'setup' : name)));
     if (name !== 'sites') window.scrollTo(0, 0);
     document.querySelectorAll('.side a[aria-current]').forEach((a) => a.setAttribute('aria-current', 'page'));
     main.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
@@ -269,18 +269,47 @@
   }
 
   /* ---------- one site, day by day ---------- */
-  async function sitePage(id) {
+  // one system on its own page: its readings, its complaints and tasks, nothing from the rest of the site
+  async function systemPage(sysId) {
+    const rows = await q(sb.from('solar_system_status').select('id, site_id').eq('id', decodeURIComponent(sysId || '')));
+    if (!rows.length) { main.replaceChildren(h('p', { class: 'empty' }, 'That system was not found. ', h('a', { href: '#systems' }, 'Back to all systems'))); return; }
+    return sitePage(rows[0].site_id, rows[0].id);
+  }
+
+  // raise a complaint against one system
+  function raiseComplaint(x, site, onDone) {
+    const reason = input('rc-reason', '', { required: true, placeholder: 'For example: inverter showing error, battery not charging, MCB tripped' });
+    const details = h('textarea', { id: 'rc-details' });
+    const due = input('rc-due', addDays(today(), 3), { type: 'date', required: true });
+    const assigned = input('rc-assigned', '');
+    const files = input('rc-files', '', { type: 'file', accept: 'image/*,application/pdf', multiple: true });
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      const row = await q(sb.from('solar_tickets').insert({ type: 'Manual', system_id: x.id, site_id: x.site_id, site: `${site.name} · ${x.system || x.id}`, reason: reason.value.trim(),
+        details: details.value.trim() || null, due: due.value, assigned_to: assigned.value.trim() || null }).select().single());
+      try { await uploadTicketPhotos(row.id, files.files); } catch (err) { toast('Complaint raised, but the photos did not upload', true); }
+      closeDialog(); toast('Complaint ' + tno(row.id) + ' raised'); refreshCounts(); onDone ? onDone() : route();
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, `Raise a complaint · ${x.id} ${x.system || ''}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('p', { class: 'muted' }, site.name),
+      h('div', { class: 'form-grid' }, field('What is wrong', reason, 'wide'), field('Details', details, 'wide'), field('Fix by', due), field('Assigned to', assigned), field('Photos (optional)', files, 'wide')),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Raise complaint'))));
+  }
+
+  async function sitePage(id, only) {
     const t0 = today();
     const { sites, conns } = await loadSites();
     const site = sites.find((x) => x.id === id);
     if (!site) { main.replaceChildren(h('p', { class: 'empty' }, 'That site was not found. ', h('a', { href: '#overview' }, 'Back to all sites'))); return; }
     const lines = conns.filter((c) => c.site_id === id && c.tracking !== 'Retired');
-    const systems = (await q(sb.from('solar_system_status').select('*').eq('site_id', id).order('sort'))).filter((x) => x.tracking !== 'Retired');
-    const solar = systems.filter((x) => x.type !== 'Grid meter');
-    const sysIds = systems.map((x) => x.id), connIds = lines.map((c) => c.id);
+    const allSystems = await q(sb.from('solar_system_status').select('*').eq('site_id', id).order('sort'));
+    const systems = only ? allSystems.filter((x) => x.id === only) : allSystems.filter((x) => x.tracking !== 'Retired');
+    const one = only ? systems[0] : null;
+    const solar = only ? systems : systems.filter((x) => x.type !== 'Grid meter');
+    const sysIds = systems.map((x) => x.id), connIds = only ? [] : lines.map((c) => c.id);
     const from = addDays(t0, -(siteState.days - 1));
     const none = Promise.resolve([]);
-    const [gen, imp, tix, log, bills, planned] = await Promise.all([
+    const [gen, imp, tixAll, logAll, billsAll, planned] = await Promise.all([
       sysIds.length ? q(sb.from('solar_generation').select('*').in('system_id', sysIds).gte('date', from).order('date')) : none,
       connIds.length ? q(sb.from('solar_eb_import').select('*').in('eb_connection_id', connIds).gte('date', from).order('date')) : none,
       q(sb.from('solar_tickets').select('*').eq('site_id', id).order('id', { ascending: false })),
@@ -288,6 +317,9 @@
       q(sb.from('solar_eb_bills').select('*').eq('site_id', id).order('period_to', { ascending: false, nullsFirst: false })),
       sysIds.length ? q(sb.from('solar_planned_work').select('*').in('system_id', sysIds)) : none,
     ]);
+    // on a system's own page: only its complaints and tasks, and no site-wide notes or EB bills
+    const tix = only ? tixAll.filter((t) => t.system_id === only) : tixAll;
+    const log = only ? [] : logAll, bills = only ? [] : billsAll;
     const notes = tix.length ? await q(sb.from('solar_ticket_notes').select('*').in('ticket_id', tix.map((t) => t.id)).order('created_at')) : [];
     const sysName = Object.fromEntries(systems.map((x) => [x.id, x.system || x.id]));
     const live = solar.filter((x) => x.tracking === 'Live');
@@ -351,6 +383,7 @@
       h('thead', null, h('tr', null, h('th', null, 'Day'), showSolar ? h('th', { class: 'n' }, 'Solar units') : null, showSolar ? h('th', { class: 'day-bar' }, 'Against expected') : null,
         imp.length ? h('th', { class: 'n' }, 'EB in daylight') : null, h('th', null, 'What happened'))),
       h('tbody', null, shown.map(dayRow))))
+      : only ? h('p', { class: 'empty' }, `Nothing recorded for this system in the last ${siteState.days} days. Readings appear once it is tracked; complaints and tasks appear as they are raised.`)
       : h('p', { class: 'empty' }, `Nothing recorded here in the last ${siteState.days} days. Meter readings appear once this site's solar or EB line is tracked; notes, tickets, tasks and bills appear as they are added.`);
 
     // header figures
@@ -362,8 +395,9 @@
     const figs = h('section', { class: 'panel dash-strip' },
       live.length ? fig(lastGen ? n1(genByDay.get(lastGen).total) : '—', lastGen ? `units on ${fmtDay(lastGen)}` : 'no readings in this period', lastGen && exp && genByDay.get(lastGen).total < 0.6 * exp ? 'low' : null) : null,
       live.length ? fig(avg7 == null ? '—' : n1(avg7), `a day, last 7 readings${exp ? ' · expected ' + n0(exp) : ''}`, avg7 != null && exp && avg7 < 0.75 * exp ? 'mid' : null) : null,
-      fig(bills[0] ? rupees(bills[0].amount) : '—', bills[0] ? `${monthOf(bills[0])} bill · ${n0(billUnits(bills[0]))} units${isUnpaid(bills[0]) ? (bills[0].due_date ? ' · due ' + fmtDay(bills[0].due_date) : '') + ', not paid' : ''}` : 'no bills entered', bills[0] && payState(bills[0]) === 'overdue' ? 'low' : null),
-      fig(String(openTix.filter((t) => t.type !== 'Setup').length), 'open tickets and tasks', openTix.some((t) => t.due && t.due < t0 && t.type !== 'Setup') ? 'low' : null));
+      only ? fig(one.tracking === 'Live' ? (isFault(one) ? 'Fault' : 'Working') : one.tracking === 'Pending' ? 'Not tracked' : one.tracking, one.tracking === 'Live' ? (isFault(one) ? one.attention : `tracked via ${one.tracked_via}`) : one.tracking === 'Pending' ? 'no readings are coming in yet' : 'not in service', isFault(one) ? 'low' : null)
+      : fig(bills[0] ? rupees(bills[0].amount) : '—', bills[0] ? `${monthOf(bills[0])} bill · ${n0(billUnits(bills[0]))} units${isUnpaid(bills[0]) ? (bills[0].due_date ? ' · due ' + fmtDay(bills[0].due_date) : '') + ', not paid' : ''}` : 'no bills entered', bills[0] && payState(bills[0]) === 'overdue' ? 'low' : null),
+      fig(String(openTix.filter((t) => t.type !== 'Setup').length), only ? 'open complaints and tasks' : 'open tickets and tasks', openTix.some((t) => t.due && t.due < t0 && t.type !== 'Setup') ? 'low' : null));
 
     const chart = h('div', { class: 'chart' });
     if (hasMeter) requestAnimationFrame(() => siteChart(chart, daysDesc.slice().reverse(), genByDay, impByDay, exp, events));
@@ -380,17 +414,42 @@
       ...lines.filter((l) => l.notes).map((l) => h('p', { class: 'ctx-notes' }, l.notes)));
     const openPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Open now'),
       openTix.length ? h('ul', { class: 'plain queue' }, openTix.sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999'))).map((t) => h('li', null,
-        h('a', { href: '#ticket/' + t.id }, t.reason), h('div', { class: 'small ' + (t.due && t.due < t0 && t.type !== 'Setup' ? 'due-bad' : 'muted') },
-          `${t.type === 'Task' ? 'Task' : t.type === 'Setup' ? 'Question' : 'Ticket'}${t.due ? ' · due ' + fmtDay(t.due) + (t.due < t0 && t.type !== 'Setup' ? ', overdue' : '') : ''}${t.assigned_to ? ' · ' + t.assigned_to : ''}`))))
+        h('a', { href: '#ticket/' + t.id }, t.reason),
+        canWrite() ? h('button', { class: 'btn small q-close', onclick: () => closeTicketDialog(t, route) }, t.type === 'Task' ? 'Done' : 'Resolve') : null,
+        h('div', { class: 'small ' + (t.due && t.due < t0 && t.type !== 'Setup' ? 'due-bad' : 'muted') },
+          `${!only && t.system_id && solar.length > 1 ? (sysName[t.system_id] || t.system_id) + ' · ' : ''}${t.type === 'Task' ? 'Task' : t.type === 'Setup' ? 'Question' : 'Complaint'}${t.due ? ' · due ' + fmtDay(t.due) + (t.due < t0 && t.type !== 'Setup' ? ', overdue' : '') : ''}${t.assigned_to ? ' · ' + t.assigned_to : ''}`))))
         : h('p', { class: 'muted' }, 'Nothing open.'));
     const billPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Last bills'),
       bills.length ? h('div', { class: 'bill-row' }, bills.slice(0, 3).map((b) => h('button', { class: 'bill-mini' + (b.status === 'Submitted' ? ' wait' : b.status === 'Rejected' ? ' bad' : ''), onclick: () => billDetail(b) },
         h('span', { class: 'd' }, monthOf(b) + (isUnpaid(b) ? ' · unpaid' : '')), h('span', { class: 'u' }, n0(billUnits(b)) + ' u'), h('span', { class: 'a' }, rupees(b.amount)))))
         : h('p', { class: 'muted' }, 'No bills entered.'),
       bills.length > 3 ? h('a', { class: 'small', href: '#bills' }, `All ${bills.length} bills`) : null);
+    const closedTix = tix.filter((t) => t.status === 'Closed').sort((a, b) => String(b.closed_on || '').localeCompare(String(a.closed_on || '')));
+    const historyPanel = only ? h('section', { class: 'panel side-panel' }, h('h3', null, 'Resolved'),
+      closedTix.length ? h('ul', { class: 'plain queue' }, closedTix.slice(0, 12).map((t) => h('li', null, h('a', { href: '#ticket/' + t.id }, t.reason),
+        h('div', { class: 'small muted' }, `${t.closed_on ? fmtDay(t.closed_on) : ''}${t.resolution ? ' · ' + t.resolution : ''}`))))
+        : h('p', { class: 'muted' }, 'Nothing resolved yet.')) : null;
+    const onePanel = one ? h('section', { class: 'panel side-panel' }, h('h3', null, 'This system'),
+      kv('ID', one.id), kv('Type', one.type), kv('Inverter', specLine(one.inverter_spec, 'inverter')), kv('Panels', specLine(one.panel_spec, 'panel')), kv('Battery', specLine(one.battery_spec, 'battery')),
+      kv('Tracked via', one.tracked_via), kv('Expected', one.expected_kwh != null ? n0(one.expected_kwh) + ' units a day' : null),
+      one.notes ? h('p', { class: 'ctx-notes' }, one.notes) : null) : null;
+    // each system on the site as its own card, so each can be opened, complained about and resolved separately
+    const sysCards = !only && solar.length ? h('section', null, h('h2', null, solar.length > 1 ? `Systems here · ${solar.length}` : 'System here'),
+      h('div', { class: 'dash-grid' }, solar.map((x) => {
+        const mine = openTix.filter((t) => t.system_id === x.id && t.type !== 'Setup');
+        const lastX = d3.max(gen.filter((g) => g.system_id === x.id), (g) => g.date);
+        const lv = x.tracking !== 'Live' ? 'idle' : isFault(x) || mine.some((t) => t.due && t.due < t0) ? 'bad' : mine.length ? 'warn' : 'ok';
+        return h('div', { class: 'dash-card sys-card ' + lv },
+          h('a', { class: 'dc-head', href: '#system/' + x.id }, h('h3', null, `${x.id} · ${x.system || x.type || ''}`),
+            h('span', { class: 'chip ' + (lv === 'bad' ? 'bad' : lv === 'ok' ? 'ok' : '') }, x.tracking !== 'Live' ? (x.tracking === 'Pending' ? 'Not tracked' : x.tracking) : isFault(x) ? 'Fault' : 'Working')),
+          h('p', { class: 'setup-why' }, x.tracking === 'Live' ? (isFault(x) ? x.attention : lastX ? `${n1(gen.find((g) => g.system_id === x.id && g.date === lastX).kwh)} units on ${fmtDay(lastX)} · expected ${n0(x.expected_kwh)}` : 'No readings in this period') : [x.type, capText(capSum([x]))].filter(Boolean).join(' · ')),
+          h('p', { class: 'small ' + (mine.some((t) => t.due && t.due < t0) ? 'due-bad' : 'muted') }, mine.length ? `${mine.length} open` : 'Nothing open'),
+          h('div', { class: 'actions sys-actions' }, h('a', { class: 'btn small', href: '#system/' + x.id }, 'Open'),
+            canWrite() ? h('button', { class: 'btn small', onclick: () => raiseComplaint(x, site, route) }, 'Raise a complaint') : null));
+      }))) : null;
     const sysPanel = h('section', { class: 'panel side-panel' }, h('h3', null, 'Solar systems'),
       solar.length ? solar.map((x) => h('div', { class: 'ctx-sys' },
-        h('button', { class: 'link', onclick: () => editSystem(x) }, h('strong', null, `${x.id} ${x.system || ''}`)),
+        h('a', { href: '#system/' + x.id }, h('strong', null, `${x.id} ${x.system || ''}`)),
         h('div', { class: 'small ' + (isFault(x) ? 'due-bad' : 'muted') }, x.tracking === 'Live' ? (isFault(x) ? x.attention : `Tracked via ${x.tracked_via} · expected ${n0(x.expected_kwh)} a day`) : x.tracking === 'Pending' ? 'Not tracked yet' : x.tracking),
         x.notes ? h('div', { class: 'small muted' }, x.notes) : null)) : h('p', { class: 'muted' }, 'No solar system at this site.'));
 
@@ -412,13 +471,18 @@
     const fault = live.filter(isFault);
 
     main.replaceChildren(...[
-      h('a', { class: 'back', href: '#overview' }, '← All sites'),
-      pageHead(site.name, [site.site_type, lines.map((l) => l.service_no).filter(Boolean).join(', '), capText(c)].filter(Boolean).join(' · ') || 'No details entered yet.',
+      only ? h('a', { class: 'back', href: '#site/' + id }, '← ' + site.name) : h('a', { class: 'back', href: '#overview' }, '← All sites'),
+      only ? pageHead(`${one.id} · ${one.system || one.type || 'System'}`, [site.name, one.type, capText(capSum([one]))].filter(Boolean).join(' · '),
+        canWrite() ? h('button', { class: 'btn primary', onclick: () => raiseComplaint(one, site, route) }, 'Raise a complaint') : null,
+        canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites, id, route, one.id) }, 'New task') : null,
+        canWrite() ? h('button', { class: 'btn', onclick: () => editSystem(one) }, 'Edit system') : null)
+      : pageHead(site.name, [site.site_type, lines.map((l) => l.service_no).filter(Boolean).join(', '), capText(c)].filter(Boolean).join(' · ') || 'No details entered yet.',
         canWrite() ? h('button', { class: 'btn primary', onclick: addNote }, 'Add a note') : null,
         canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites, id, route) }, 'New task') : null,
         canWrite() ? h('button', { class: 'btn', onclick: () => editSite(site, sites) }, 'Edit site') : null),
       fault.length ? h('p', { class: 'site-alert' }, fault.map((x) => `${x.system || x.id}: ${x.attention}`).join(' · ')) : null,
       figs,
+      sysCards,
       h('div', { class: 'site-cols' },
         h('div', { class: 'site-main' },
           h('section', { class: 'panel' },
@@ -429,7 +493,7 @@
               h('span', null, h('i', { class: 'sw dot' }), 'Something happened')) : null,
             hasMeter ? chart : null,
             dayTable)),
-        h('aside', { class: 'site-side' }, openPanel, billPanel, sysPanel, details))].filter(Boolean));
+        h('aside', { class: 'site-side' }, ...(only ? [openPanel, historyPanel, onePanel] : [openPanel, billPanel, details])))].filter(Boolean));
   }
 
   function siteChart(box, days, genByDay, impByDay, exp, events) {
@@ -592,7 +656,7 @@
       h('div', { class: 'actions' }, btn)));
   }
 
-  function newTask(sites, presetSite, onDone) {
+  function newTask(sites, presetSite, onDone, presetSys) {
     const site = select('ta-site', presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
     site.required = true;
     const reason = input('ta-reason', '', { required: true, placeholder: 'For example: clean panels, fix earthing, replace battery cables' });
@@ -602,11 +666,11 @@
     openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
       e.preventDefault();
       const st = sites.find((x) => x.id === site.value);
-      await q(sb.from('solar_tickets').insert({ type: 'Task', site_id: site.value, site: st ? st.name : null, reason: reason.value.trim(),
+      await q(sb.from('solar_tickets').insert({ type: 'Task', site_id: site.value, system_id: presetSys && site.value === presetSite ? presetSys : null, site: st ? st.name + (presetSys && site.value === presetSite ? ' · ' + presetSys : '') : null, reason: reason.value.trim(),
         details: details.value.trim() || null, due: due.value, assigned_to: assigned.value.trim() || null }));
       closeDialog(); toast('Task added'); refreshCounts(); onDone ? onDone() : route();
     } },
-      h('div', { class: 'dlg-head' }, h('h2', null, 'New task'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('div', { class: 'dlg-head' }, h('h2', null, presetSys ? 'New task · ' + presetSys : 'New task'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
       h('div', { class: 'form-grid' }, field('Site', site, 'wide'), field('What needs doing', reason, 'wide'), field('Details', details, 'wide'), field('Due by', due), field('Assigned to', assigned)),
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Add task'))));
   }
@@ -1122,7 +1186,7 @@
       const c = cap(s);
       const high = c.ratio != null && c.ratio > RATIO_HIGH;
       return h('div', { class: 'sysx' + (s.tracking === 'Live' ? '' : ' dim'), tabindex: 0, role: 'button',
-        onclick: () => editSystem(s), onkeydown: (e) => { if (e.key === 'Enter') editSystem(s); } },
+        onclick: () => { location.hash = 'system/' + s.id; }, onkeydown: (e) => { if (e.key === 'Enter') location.hash = 'system/' + s.id; } },
         h('div', { class: 'sysx-name' },
           h('div', null, h('span', { class: 'sysx-id' }, s.id), h('strong', null, s.system || s.type || 'Unnamed')),
           h('div', { class: 'muted' }, [s.type, s.tracked_via && s.tracked_via !== 'Not tracked yet' ? 'via ' + s.tracked_via : null].filter(Boolean).join(' · '))),
@@ -1161,7 +1225,7 @@
     status.addEventListener('change', () => { sysFilter.status = status.value; draw(); });
     draw();
     main.replaceChildren(
-      pageHead('Systems', `Grouped by site. Click a system to edit it. Panel ÷ inverter above ${RATIO_HIGH}× is marked amber.`,
+      pageHead('Systems', `Grouped by site. Click a system to open its own page. Panel ÷ inverter above ${RATIO_HIGH}× is marked amber.`,
         canWrite() ? h('button', { class: 'btn primary', onclick: () => editSystem(null) }, 'Add a system') : null),
       h('div', { class: 'filters sx-filters' }, field('Search', search), field('Type', type), field('Status', status)),
       body);

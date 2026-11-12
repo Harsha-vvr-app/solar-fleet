@@ -408,3 +408,14 @@ td.day-events { width: 55%; }
 .pay-row .pay-act { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
 .pay-row .pay-act input { width: auto; }
 .setup-why { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.4; }
+
+/* a card and a page per system */
+.sys-card { cursor: default; grid-template-rows: auto auto auto auto; }
+.sys-card.bad { border-left-color: var(--bad); } .sys-card.warn { border-left-color: var(--sun); } .sys-card.ok { border-left-color: var(--ok); }
+.sys-card a.dc-head { color: inherit; text-decoration: none; }
+.sys-card a.dc-head:hover h3 { text-decoration: underline; }
+.sys-card p { margin: 0; }
+.sys-actions { justify-content: flex-start; gap: 8px; margin-top: 4px; }
+.btn.small { padding: 3px 10px; font-size: .82rem; }
+.queue li { position: relative; }
+.queue .q-close { float: right; margin-left: 8px; }
