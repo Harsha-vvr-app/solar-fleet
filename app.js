@@ -131,7 +131,7 @@
   }
 
   /* ---------- dashboard: every site at a glance ---------- */
-  const dashState = { q: '', type: '' };
+  const dashState = { q: '', type: '', show: '' };
   const siteState = { days: 30 };
   const istDate = (ts) => (ts ? new Date(Date.parse(ts) + 19800000).toISOString().slice(0, 10) : null);
   const isFault = (x) => x.tracking === 'Live' && x.attention && !['OK', 'Open item'].includes(x.attention);
@@ -188,84 +188,64 @@
       return { site, sys, live, byDay, siteLast, made, exp, faults, overdue, issues, tasks, bills, waiting, unpaid, kw, level, label, why };
     });
 
+    // the dashboard: four headline tiles, then every site as one short line grouped by type
+    const short = { Fault: 'Fault', Overdue: 'Overdue', 'Bill overdue': 'Bill overdue', 'Open issue': 'Issue open', 'Bill due': 'Bill due', 'Bill to approve': 'Bill to approve', 'Task open': 'Task open', OK: 'Working', 'Not tracked': 'Not tracked', 'No solar': 'No solar' };
+    const rank = { bad: 0, warn: 1, ok: 2, idle: 3 };
+    const list = h('div', { class: 'dg-groups' });
     const draw = () => {
-      const qq = dashState.q.trim().toLowerCase();
-      const list = cards.filter((c) => (!dashState.type || (c.site.site_type || '') === dashState.type) && (!qq || `${c.site.name} ${c.site.site_type || ''}`.toLowerCase().includes(qq)));
-      const groups = [['bad', 'Needs attention now'], ['warn', 'Something open'], ['ok', 'Working normally'], ['idle', 'Nothing tracked yet']]
-        .map(([k, title]) => [k, title, list.filter((c) => c.level === k).sort((a, b) => a.site.name.localeCompare(b.site.name, undefined, { numeric: true }))])
-        .filter(([, , l]) => l.length);
-      grid.replaceChildren(...(groups.length ? groups.map(([k, title, l]) => h('section', null,
-        h('h2', { class: 'dash-group ' + k }, title, h('span', { class: 'muted' }, ` · ${l.length}`)),
-        h('div', { class: 'dash-grid' }, l.map(card)))) : [h('p', { class: 'empty' }, 'No sites match.')]));
-    };
-    const card = (c) => {
-      const latest = c.bills[0], prev = c.bills[1];
-      const change = latest && prev && billUnits(prev) ? Math.round(((billUnits(latest) - billUnits(prev)) / billUnits(prev)) * 100) : null;
-      const openBits = [c.issues.length && plural(c.issues.length, 'issue'), c.tasks.length && plural(c.tasks.length, 'task'), c.overdue.length && `${c.overdue.length} overdue`].filter(Boolean);
-      const low = c.made != null && c.exp && c.made < 0.6 * c.exp;
-      return h('a', { class: 'dash-card ' + c.level, href: '#site/' + c.site.id },
-        h('div', { class: 'dc-head' }, h('h3', null, c.site.name), h('span', { class: 'dc-pill ' + c.level }, c.label)),
-        h('p', { class: 'dc-why' }, c.why),
-        c.live.length ? h('div', { class: 'dc-solar' },
-          h('div', null,
-            h('div', { class: 'dc-num' + (low ? ' low' : '') }, c.made == null ? '—' : n1(c.made), h('span', null, ' units')),
-            h('div', { class: 'muted small' }, `${c.siteLast ? fmtDay(c.siteLast) : 'no reading'}${c.exp ? ' · expected ' + n0(c.exp) : ''}`)),
-          h('div', { class: 'spark' }, spark(c.byDay, lastDay)))
-          : h('p', { class: 'muted dc-nosolar' }, c.sys.length ? `${c.kw ? n0(c.kw) + ' kW solar' : 'Solar'}, not tracked yet` : 'No solar system'),
-        h('div', { class: 'dc-foot' },
-          h('span', null, latest ? [h('span', { class: 'muted' }, `${monthOf(latest)} bill `), rupees(latest.amount), isUnpaid(latest) ? h('span', { class: payState(latest) === 'overdue' ? 'due-bad' : 'muted' }, ' unpaid') : null,
-            change != null && Math.abs(change) >= 10 ? h('span', { class: change > 0 ? 'due-bad' : 'good-text' }, ` ${change > 0 ? '+' : ''}${change}%`) : null] : h('span', { class: 'muted' }, 'No bill yet')),
-          h('span', { class: c.overdue.length ? 'due-bad' : 'muted' }, openBits.join(' · ') || 'Nothing open')));
+      const shown = cards.filter((c) => dashState.show !== 'attention' || c.level === 'bad' || c.level === 'warn');
+      const typeOrder = ['Hostel', 'School', 'Office', 'Residence', 'Shop', 'Construction site'];
+      const types = [...new Set(shown.map((c) => c.site.site_type || 'Other'))]
+        .sort((a, b) => (typeOrder.indexOf(a) + 1 || 99) - (typeOrder.indexOf(b) + 1 || 99) || a.localeCompare(b));
+      list.replaceChildren(...(types.length ? types.map((t) => {
+        const rows = shown.filter((c) => (c.site.site_type || 'Other') === t)
+          .sort((a, b) => rank[a.level] - rank[b.level] || a.site.name.localeCompare(b.site.name, undefined, { numeric: true }));
+        const nBadT = rows.filter((c) => c.level === 'bad').length, nWarnT = rows.filter((c) => c.level === 'warn').length;
+        return h('section', { class: 'panel dg' },
+          h('div', { class: 'dg-head' }, h('h2', null, t === 'Other' ? 'Not grouped yet' : t + (rows.length === 1 || /s$/.test(t) ? '' : 's')),
+            h('span', { class: 'muted' }, String(rows.length)),
+            nBadT ? h('span', { class: 'dg-count bad' }, `${nBadT} need${nBadT === 1 ? 's' : ''} attention`) : nWarnT ? h('span', { class: 'dg-count warn' }, `${nWarnT} with something open`) : null),
+          h('ul', { class: 'plain dg-list' }, rows.map((c) => h('li', null,
+            h('a', { class: 'dg-row ' + c.level, href: '#site/' + c.site.id, title: c.why },
+              h('span', { class: 'dot ' + c.level }), h('span', { class: 'dg-name' }, c.site.name),
+              h('span', { class: 'dg-state ' + c.level }, short[c.label] || c.label), h('span', { class: 'dg-go', 'aria-hidden': 'true' }, '›'))))));
+      }) : [h('p', { class: 'empty' }, 'Nothing needs attention.')]));
+      showAll.setAttribute('aria-pressed', String(dashState.show !== 'attention'));
+      showAtt.setAttribute('aria-pressed', String(dashState.show === 'attention'));
     };
 
-    // top strip
+    // headline tiles, each a door into the detail
     const tracked = systems.filter((x) => x.tracking === 'Live' && x.type !== 'Grid meter');
     const allSys = systems.filter((x) => x.tracking !== 'Retired' && x.type !== 'Grid meter');
     const fresh = tracked.filter((x) => gen.some((g) => g.system_id === x.id && g.date === lastDay));
     const made = d3.sum(gen.filter((g) => g.date === lastDay && fresh.some((x) => x.id === g.system_id)), (g) => +g.kwh || 0);
     const exp = d3.sum(fresh, (x) => +x.expected_kwh || 0);
     const overdueAll = open.filter((t) => t.due && t.due < t0 && t.type !== 'Setup').length;
+    const openAll = open.filter((t) => t.type !== 'Setup').length;
     const waitingBills = billsAll.filter((b) => b.status === 'Submitted');
     const toPay = billsAll.filter(isUnpaid);
-    const liveLines = lines.filter((l) => l.tracking === 'Live').length, allLines = lines.filter((l) => l.tracking !== 'Retired').length;
-    const fig = (v, l, cls, href) => h(href ? 'a' : 'div', { class: 'fig' + (cls ? ' ' + cls : ''), href }, h('div', { class: 'v' }, v), h('div', { class: 'l' }, l));
-    const nBad = cards.filter((c) => c.level === 'bad').length;
-    const strip = h('section', { class: 'panel dash-strip' },
-      fig(String(nBad), nBad === 1 ? 'site needs attention' : 'sites need attention', nBad ? 'low' : null),
-      fig(String(overdueAll), 'overdue tickets and tasks', overdueAll ? 'low' : null, '#tickets'),
-      fig(String(waitingBills.length), isOwner() ? 'bills for you to approve' : 'bills awaiting approval', waitingBills.length ? 'mid' : null, '#bills'),
-      fig(n0(made), `units on ${fmtDay(lastDay)}${exp ? ' · expected ' + n0(exp) : ''}`, exp && made < 0.75 * exp ? 'low' : null),
-      fig(`${tracked.length}/${allSys.length}`, 'solar systems tracked', null, '#systems'),
-      fig(String(toPay.length), `bills to pay${toPay.length ? ' · ' + rupees(d3.sum(toPay, (b) => +b.amount || 0)) : ''}`, toPay.some((b) => payState(b) === 'overdue') ? 'low' : null, '#bills'));
+    const nBad = cards.filter((c) => c.level === 'bad').length, nWarn = cards.filter((c) => c.level === 'warn').length;
+    const tile = (cls, label, big, sub, attrs) => h(attrs.href ? 'a' : 'button', { class: 'tile ' + (cls || ''), type: attrs.href ? null : 'button', ...attrs },
+      h('span', { class: 'tile-l' }, label), h('span', { class: 'tile-v' }, big), h('span', { class: 'tile-s' }, sub));
+    const tiles = h('div', { class: 'tiles' },
+      tile(nBad ? 'bad' : nWarn ? 'warn' : 'ok', 'Sites', nBad ? String(nBad) : nWarn ? String(nWarn) : 'All OK',
+        nBad ? `need${nBad === 1 ? 's' : ''} attention${nWarn ? ` · ${nWarn} more with something open` : ''}` : nWarn ? 'with something open' : `${cards.length} sites`,
+        { onclick: () => { dashState.show = 'attention'; draw(); list.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }),
+      tile(overdueAll ? 'bad' : '', 'Tickets and tasks', String(openAll), overdueAll ? `open · ${overdueAll} overdue` : 'open', { href: '#tickets' }),
+      tile(toPay.some((b) => payState(b) === 'overdue') ? 'bad' : waitingBills.length || toPay.length ? 'warn' : '', 'EB bills',
+        waitingBills.length ? String(waitingBills.length) : toPay.length ? rupees(d3.sum(toPay, (b) => +b.amount || 0)) : 'Clear',
+        waitingBills.length ? (isOwner() ? 'to approve' : 'awaiting approval') + (toPay.length ? ` · ${toPay.length} to pay` : '') : toPay.length ? `to pay · ${plural(toPay.length, 'bill')}` : 'nothing to approve or pay', { href: '#bills' }),
+      tile(exp && made < 0.75 * exp ? 'warn' : '', 'Solar', fresh.length ? n0(made) + ' units' : '—',
+        fresh.length ? `on ${fmtDay(lastDay)}${exp ? ' · expected ' + n0(exp) : ''} · ${tracked.length} of ${allSys.length} tracked` : `${tracked.length} of ${allSys.length} systems tracked`, { href: '#systems' }));
 
-    const queue = waitingBills.length ? h('section', null, h('h2', null, isOwner() ? 'Bills waiting for your approval' : 'Bills waiting for approval'),
-      h('div', { class: 'panel' }, h('ul', { class: 'plain queue' }, waitingBills.map((b) => h('li', null,
-        h('button', { class: 'link', onclick: () => billDetail(b) }, b.site),
-        h('span', { class: 'muted' }, ` · ${b.period_to ? 'period to ' + fmtDate(b.period_to) : fmtDate(b.bill_date)} · ${n0(billUnits(b))} units · ${rupees(b.amount)}`)))))) : null;
-
-    const tasks = open.filter((t) => t.type === 'Task').sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999')));
-    const taskSec = h('section', null, h('div', { class: 'sec-head' }, h('h2', null, 'Open tasks'),
-        canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites) }, 'New task') : null),
-      h('div', { class: 'panel' }, tasks.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, ['Due', 'Site', 'Task', 'Assigned to', ''].map((c) => h('th', null, c)))),
-        h('tbody', null, tasks.map((t) => h('tr', { class: 'click' + (t.due < t0 ? ' overdue' : ''), onclick: (e) => { if (!e.target.closest('button')) location.hash = 'ticket/' + t.id; } },
-          h('td', { class: 'nw' + (t.due < t0 ? ' due-bad' : '') }, t.due ? fmtDay(t.due) + (t.due < t0 ? ' · overdue' : t.due === t0 ? ' · today' : '') : '—'),
-          h('td', null, t.site || '—'), h('td', null, t.reason), h('td', null, t.assigned_to || '—'),
-          h('td', { class: 'row-actions' }, canWrite() ? h('button', { class: 'btn small', onclick: () => closeTicketDialog(t, () => { route(); refreshCounts(); }) }, 'Done') : null))))))
-        : h('p', { class: 'empty' }, 'No open tasks.')));
-
-    const search = input('ds-q', dashState.q, { type: 'search', placeholder: 'Find a site' });
-    search.addEventListener('input', () => { dashState.q = search.value; draw(); });
-    const types = [...new Set(sites.map((x) => x.site_type).filter(Boolean))].sort();
-    const type = select('ds-type', dashState.type, [['', 'All types'], ...types.map((t) => [t, t])]);
-    type.addEventListener('change', () => { dashState.type = type.value; draw(); });
-    const grid = h('div', { class: 'dash-groups' });
+    const showAll = h('button', { class: 'seg', type: 'button', onclick: () => { dashState.show = ''; draw(); } }, 'All sites');
+    const showAtt = h('button', { class: 'seg', type: 'button', onclick: () => { dashState.show = 'attention'; draw(); } }, 'Needs attention');
     draw();
-    main.replaceChildren(...[
-      pageHead('Dashboard', 'Every site at a glance. Click a site to see what happened there day by day.'),
-      strip, queue,
-      h('div', { class: 'filters' }, field('Search', search), field('Type', type)),
-      grid, taskSec].filter(Boolean));
+    main.replaceChildren(
+      pageHead('Dashboard', 'Click any tile or site to go into it.', canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites) }, 'New task') : null),
+      tiles,
+      h('div', { class: 'sec-head dg-bar' }, h('h2', null, 'Sites'), h('div', { class: 'segs', role: 'group', 'aria-label': 'Show' }, showAll, showAtt)),
+      list);
   }
 
   /* ---------- one site, day by day ---------- */
