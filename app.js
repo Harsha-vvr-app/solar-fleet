@@ -336,13 +336,14 @@
 
   async function overview() {
     const t0 = today();
-    const [{ sites }, systems, gen, open, billsAll, lines] = await Promise.all([
+    const [{ sites, conns }, systems, gen, open, billsAll, lines, impRecent] = await Promise.all([
       loadSites(),
       q(sb.from('solar_system_status').select('*').order('sort')),
       q(sb.from('solar_generation').select('date, system_id, kwh, note').gte('date', addDays(t0, -16)).order('date')),
       q(sb.from('solar_tickets').select('*').neq('status', 'Closed')),
       q(sb.from('solar_eb_bills').select('*').order('period_to', { ascending: false, nullsFirst: false })),
       q(sb.from('solar_eb_connections').select('id, tracking')),
+      q(sb.from('solar_eb_import').select('eb_connection_id, date').gte('date', addDays(t0, -3))),
     ]);
     const lastDay = d3.max(gen, (g) => g.date) || addDays(t0, -1);
 
@@ -429,11 +430,47 @@
       tile(exp && made < 0.75 * exp ? 'warn' : '', 'Solar', fresh.length ? n0(made) + ' units' : '—',
         fresh.length ? `on ${fmtDay(lastDay)}${exp ? ' · expected ' + n0(exp) : ''} · ${tracked.length} of ${allSys.length} tracked` : `${tracked.length} of ${allSys.length} systems tracked`, { href: '#systems' }));
 
+    // getting set up comes first: step 1 facts, step 2 daily tracking
+    const recentBill = addDays(t0, -183);
+    const liveConns = conns.filter((c) => c.tracking !== 'Retired');
+    const sysReal = systems.filter((x) => x.tracking !== 'Retired' && x.type !== 'Grid meter');
+    const step1 = sites.map((site) => {
+      const ls = liveConns.filter((c) => c.site_id === site.id), sy = sysReal.filter((x) => x.site_id === site.id);
+      const lb = d3.max(billsAll.filter((b) => b.site_id === site.id && b.status !== 'Rejected'), (b) => b.period_to || b.bill_date);
+      const miss = [
+        !ls.length || ls.some((c) => !c.service_no || c.service_no.replace(/\D/g, '').length < 10) ? 'EB number' : null,
+        ls.length && !(lb && lb >= recentBill) ? 'recent bill' : null,
+        sy.some((x) => !(x.panel_spec || []).length || !(x.inverter_spec || []).length) ? 'solar details' : null,
+        sy.length && !site.extra_items ? 'spare items' : null].filter(Boolean);
+      return { site, miss };
+    });
+    const s1done = step1.filter((r) => !r.miss.length).length;
+    const freshSys = new Set(gen.filter((g) => g.date >= addDays(t0, -3)).map((g) => g.system_id));
+    const freshLine = new Set(impRecent.map((r) => r.eb_connection_id));
+    const trackItems = [...sysReal.filter((x) => x.tracking !== 'Not installed').map((x) => ({ ok: freshSys.has(x.id), site: x.site_id })),
+      ...liveConns.map((c) => ({ ok: freshLine.has(c.id), site: c.site_id }))];
+    const s2done = trackItems.filter((x) => x.ok).length;
+    const siteName = Object.fromEntries(sites.map((x) => [x.id, x.name]));
+    const s2sites = [...new Set(trackItems.filter((x) => !x.ok).map((x) => x.site))];
+    const stepCard = (n, title, done, total, unit, nextText, step) => h('a', { class: 'panel step-card', href: '#checklist', onclick: () => { checkState.step = step; checkState.view = 'missing'; } },
+      h('div', { class: 'step-top' }, h('span', { class: 'step-n' }, 'Step ' + n), h('h2', null, title), h('span', { class: 'step-go' }, done === total ? 'Done ✓' : 'Continue →')),
+      h('div', { class: 'step-fig' }, h('span', { class: 'tile-v' }, `${done} of ${total}`), h('span', { class: 'tile-s' }, unit)),
+      h('div', { class: 'ck-bar' }, h('div', { style: `width:${total ? (done / total) * 100 : 0}%` })),
+      nextText ? h('p', { class: 'muted small step-next' }, nextText) : null);
+    const s1left = step1.filter((r) => r.miss.length);
+    const setupPanel = h('section', { class: 'step-cards' },
+      stepCard(1, 'Site facts', s1done, sites.length, 'sites fully filled in',
+        s1left.length ? `Next: ${s1left.slice(0, 3).map((r) => `${r.site.name} (${r.miss.join(', ')})`).join(' · ')}${s1left.length > 3 ? ` · and ${s1left.length - 3} more` : ''}` : 'Every site has its EB number, bills, solar details and spare items.', 1),
+      stepCard(2, 'Daily tracking', s2done, trackItems.length, 'solar systems and EB lines sending readings',
+        s2sites.length ? `Still to set up at ${plural(s2sites.length, 'site')}: ${s2sites.slice(0, 4).map((k) => siteName[k] || k).join(', ')}${s2sites.length > 4 ? ` and ${s2sites.length - 4} more` : ''}` : 'Every system and EB line sends readings every day.', 2));
+
     const showAll = h('button', { class: 'seg', type: 'button', onclick: () => { dashState.show = ''; draw(); } }, 'All sites');
     const showAtt = h('button', { class: 'seg', type: 'button', onclick: () => { dashState.show = 'attention'; draw(); } }, 'Needs attention');
     draw();
     main.replaceChildren(
-      pageHead('Dashboard', 'Click any tile or site to go into it.', canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites) }, 'New task') : null),
+      pageHead('Dashboard', 'Finish setting up first: get every site\'s facts in, then get every system and EB line sending daily readings.', canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites) }, 'New task') : null),
+      setupPanel,
+      h('h2', { class: 'dash-sub' }, 'Day to day'),
       tiles,
       h('div', { class: 'sec-head dg-bar' }, h('h2', null, 'Sites'), h('div', { class: 'segs', role: 'group', 'aria-label': 'Show' }, showAll, showAtt)),
       list);

@@ -533,3 +533,15 @@ td.day-events { width: 55%; }
 .ck-st.bad { color: var(--bad); } .ck-st.ok { color: var(--ok); }
 .ck-why { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .88rem; align-items: baseline; }
 .ck-acts { display: inline-flex; gap: 14px; margin-left: auto; font-size: .85rem; }
+
+/* dashboard: setup steps first */
+.step-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.step-card { display: grid; gap: 10px; color: inherit; text-decoration: none; border-top: 4px solid var(--sun); }
+.step-card:hover, .step-card:focus-visible { border-color: var(--muted); border-top-color: var(--sun); box-shadow: 0 2px 10px rgba(0,0,0,.08); }
+.step-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.step-top h2 { margin: 0; font-size: 1.15rem; }
+.step-n { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.step-go { margin-left: auto; font-size: .9rem; font-weight: 600; color: var(--accent, var(--ink)); }
+.step-fig { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.step-next { margin: 0; line-height: 1.45; }
+.dash-sub { margin: 6px 0 -10px; font-size: 1.05rem; color: var(--muted); }
