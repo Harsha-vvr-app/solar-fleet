@@ -102,7 +102,7 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, system: systemPage, setup };
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, system: systemPage, setup, checklist, energy };
   const SETUP_PAGES = ['sites', 'grid', 'planned', 'bulk', 'settings', 'users', 'systems', 'sitetable'];
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
@@ -133,6 +133,191 @@
     ];
     main.replaceChildren(pageHead('Setup', 'Lists and settings you need now and then.'),
       h('div', { class: 'dash-grid' }, items.map(([href, t, d]) => h('a', { class: 'dash-card', href }, h('div', { class: 'dc-head' }, h('h3', null, t)), h('p', { class: 'setup-why' }, d)))));
+  }
+
+  /* ---------- energy: EB used against solar made, site by site ---------- */
+  const energyState = { days: 30 };
+  async function energy() {
+    const t0 = today(), days = energyState.days, from = addDays(t0, -days), to = addDays(t0, -1);
+    const [{ sites, conns }, systems, gen, imp] = await Promise.all([
+      loadSites(),
+      q(sb.from('solar_systems').select('id, site_id, type, tracking, inverter_spec, panel_spec, battery_spec').neq('tracking', 'Retired')),
+      q(sb.from('solar_generation').select('system_id, date, kwh').gte('date', from).lte('date', to)),
+      q(sb.from('solar_eb_import').select('eb_connection_id, date, daylight_kwh, day_kwh').gte('date', from).lte('date', to)),
+    ]);
+    const sysSite = Object.fromEntries(systems.map((x) => [x.id, x.site_id]));
+    const lineSite = Object.fromEntries(conns.map((c) => [c.id, c.site_id]));
+    const rows = sites.map((site) => {
+      const g = gen.filter((r) => sysSite[r.system_id] === site.id && systems.find((x) => x.id === r.system_id && x.type !== 'Grid meter'));
+      const e = imp.filter((r) => lineSite[r.eb_connection_id] === site.id);
+      if (!g.length && !e.length) return null;
+      const solar = d3.sum(g, (r) => +r.kwh || 0), eb = d3.sum(e, (r) => +r.day_kwh || 0);
+      const ebDay = e.some((r) => r.daylight_kwh != null) ? d3.sum(e, (r) => +r.daylight_kwh || 0) : null;
+      const sDays = new Set(g.map((r) => r.date)).size, eDays = new Set(e.map((r) => r.date)).size;
+      const kwp = d3.sum(systems.filter((x) => x.site_id === site.id && x.type !== 'Grid meter'), (x) => cap(x).kwp || 0);
+      return { site, solar, eb, ebDay, sDays, eDays, both: g.length && e.length,
+        share: g.length && e.length && solar + eb ? solar / (solar + eb) : null,
+        solarDay: sDays ? solar / sDays : null, ebPerDay: eDays ? eb / eDays : null, ebDayPerDay: eDays && ebDay != null ? ebDay / eDays : null,
+        yieldKwp: sDays && kwp ? solar / sDays / kwp : null };
+    }).filter(Boolean).sort((a, b) => (b.both - a.both) || a.site.name.localeCompare(b.site.name, undefined, { numeric: true }));
+    const untracked = sites.length - rows.length;
+
+    const bar = (r) => r.share == null ? null : h('div', { class: 'en-bar', title: `Solar ${Math.round(r.share * 100)}% · EB ${100 - Math.round(r.share * 100)}%` },
+      h('div', { class: 'en-sun', style: `width:${r.share * 100}%` }), h('div', { class: 'en-grid' }));
+    const card = (r) => h('a', { class: 'panel en-card', href: '#site/' + r.site.id, onclick: () => { siteState.key = 'site:' + r.site.id; siteState.tab = 'days'; } },
+      h('div', { class: 'dg-head' }, h('h2', null, r.site.name), r.share != null ? h('span', { class: 'en-share' }, `${Math.round(r.share * 100)}% solar`) : h('span', { class: 'muted small' }, r.sDays ? 'EB not metered yet' : 'Solar not metered yet')),
+      bar(r),
+      h('div', { class: 'en-nums' },
+        h('div', null, h('span', { class: 'en-v en-solar' }, r.solarDay == null ? '—' : n0(r.solarDay)), h('span', { class: 'en-l' }, 'solar units a day')),
+        h('div', null, h('span', { class: 'en-v' }, r.ebPerDay == null ? '—' : n0(r.ebPerDay)), h('span', { class: 'en-l' }, 'EB units a day')),
+        h('div', null, h('span', { class: 'en-v' + (r.ebDayPerDay != null && r.solarDay != null && r.ebDayPerDay > 0.25 * r.solarDay ? ' warn' : '') }, r.ebDayPerDay == null ? '—' : n0(r.ebDayPerDay)), h('span', { class: 'en-l' }, 'EB in daylight a day'))),
+      h('p', { class: 'muted small en-foot' }, [r.sDays ? `${r.sDays} days of solar` : null, r.eDays ? `${r.eDays} days of EB` : null, r.yieldKwp != null ? `${d3.format('.1f')(r.yieldKwp)} units per kWp a day` : null].filter(Boolean).join(' · ')));
+    const range = select('en-days', String(days), [['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']]);
+    range.setAttribute('aria-label', 'Period');
+    range.addEventListener('change', () => { energyState.days = +range.value; route(); });
+    main.replaceChildren(...[
+      pageHead('Energy', 'EB used against solar made at each site, from the daily readings. Click a site to see it day by day.'),
+      h('div', { class: 'tk-bar' }, h('p', { class: 'legend small' }, h('span', null, h('i', { class: 'sw sun' }), 'Solar'), h('span', null, h('i', { class: 'sw gridfill' }), 'EB')), range),
+      rows.length ? h('div', { class: 'en-grid-wrap' }, rows.map(card)) : h('section', { class: 'panel' }, h('p', { class: 'empty' }, 'No daily readings in this period yet.')),
+      untracked ? h('p', { class: 'muted' }, `${plural(untracked, 'site')} not shown because no daily readings come in yet. `, h('a', { href: '#checklist', onclick: () => { checkState.step = 2; } }, 'See what is needed →')) : null].filter(Boolean));
+    if (energyState.days !== days) return;
+  }
+
+  /* ---------- checklist: what is still missing at each site ---------- */
+  const checkState = { view: 'missing', step: 1 };
+  async function checklist() {
+    const t0 = today();
+    const [sitesData, systems, bills, genLast, impLast] = await Promise.all([
+      loadSites(),
+      q(sb.from('solar_systems').select('*').neq('tracking', 'Retired')),
+      q(sb.from('solar_eb_bills').select('site_id, period_to, bill_date').neq('status', 'Rejected')),
+      q(sb.from('solar_generation').select('system_id, date').gte('date', addDays(t0, -30))),
+      q(sb.from('solar_eb_import').select('eb_connection_id, date').gte('date', addDays(t0, -30))),
+    ]);
+    const lastSys = d3.rollup(genLast, (v) => d3.max(v, (g) => g.date), (g) => g.system_id);
+    const lastLine = d3.rollup(impLast, (v) => d3.max(v, (r) => r.date), (r) => r.eb_connection_id);
+    const fresh = (d) => d && d >= addDays(t0, -3);
+    const { sites, conns } = sitesData;
+    const recent = addDays(t0, -183);
+    const goodNo = (c) => c.service_no && c.service_no.replace(/\D/g, '').length >= 10;
+    const hasSpec = (x) => (x.panel_spec || []).length && (x.inverter_spec || []).length;
+
+    const rows = sites.map((site) => {
+      const lines = conns.filter((c) => c.site_id === site.id && c.tracking !== 'Retired');
+      const sys = systems.filter((x) => x.site_id === site.id && x.type !== 'Grid meter');
+      const lastBill = d3.max(bills.filter((b) => b.site_id === site.id), (b) => b.period_to || b.bill_date);
+      const badLine = lines.find((c) => !goodNo(c));
+      const noSpec = sys.find((x) => !hasSpec(x));
+      const checks = [
+        { k: 'eb', ok: lines.length > 0 && !badLine, label: 'EB number',
+          why: !lines.length ? 'No EB line entered' : badLine ? `Consumer number ${badLine.service_no || 'missing'} looks wrong` : '',
+          fix: () => editConn(badLine || null, site) },
+        { k: 'bill', ok: !!lastBill && lastBill >= recent, label: 'Recent bill', na: !lines.length,
+          why: lastBill ? `Last bill ${fmtDay(lastBill)}` : 'No bills yet', fix: () => uploadBill(sitesData, site.id) },
+        { k: 'solar', ok: !noSpec, na: !sys.length, label: sys.length ? 'Solar details' : 'No solar',
+          why: noSpec ? `${noSpec.id}: panels or inverter not entered` : '',
+          fix: () => { siteState.key = 'sys:' + noSpec.id; siteState.tab = 'details'; location.hash = 'system/' + noSpec.id; } },
+        { k: 'spare', ok: !!site.extra_items, na: !sys.length, label: 'Spare items', why: 'Not checked yet', fix: () => spareDialog(site) },
+      ];
+      const needed = checks.filter((c) => !c.na);
+      const done = needed.filter((c) => c.ok).length;
+      // step 2: every EB line and every solar system sends a reading each day
+      const status = (live, d) => (!live ? { cls: 'idle', text: 'Not tracked' } : fresh(d) ? { cls: 'ok', text: `Reporting · last ${fmtDay(d)}` }
+        : { cls: 'bad', text: d ? `Stopped · last reading ${fmtDay(d)}` : 'Set up, but no readings yet' });
+      const track = [
+        ...sys.filter((x) => x.tracking !== 'Not installed').map((x) => { const d = lastSys.get(x.id); return { label: `Solar ${x.id}`, name: x.system || x.type || '', ok: fresh(d), st: status(x.tracking === 'Live', d),
+          via: x.tracking === 'Live' ? x.tracked_via : null, note: x.tracking_note, table: 'solar_systems', key: x.id, sysId: x.id,
+          why: x.tracking !== 'Live' ? 'No logger fitted yet' : d ? `Last reading ${fmtDay(d)}` : 'No readings yet', fix: () => editSystem(x) }; }),
+        ...lines.map((c) => { const d = lastLine.get(c.id); return { label: `EB ${c.code}`, name: c.service_no ? 'consumer no. ' + c.service_no : '', ok: fresh(d), st: status(c.tracking === 'Live', d),
+          via: c.tracking === 'Live' ? c.tracked_via : null, note: c.tracking_note, table: 'solar_eb_connections', key: c.id,
+          why: c.tracking !== 'Live' ? 'No meter fitted yet' : d ? `Last reading ${fmtDay(d)}` : 'No readings yet', fix: () => editConn(c, site) }; })];
+      const tracked = track.length > 0 && track.every((x) => x.ok);
+      return { site, checks, needed, done, complete: done === needed.length, track, tracked };
+    });
+
+    const step = checkState.step;
+    const isDone = (r) => (step === 1 ? r.complete : r.tracked);
+    const nDone = rows.filter(isDone).length;
+    const count = (k) => { const r = rows.map((x) => x.checks.find((c) => c.k === k)).filter((c) => !c.na); return `${r.filter((c) => c.ok).length} of ${r.length}`; };
+    const lineAll = conns.filter((c) => c.tracking !== 'Retired'), sysAll = systems.filter((x) => x.type !== 'Grid meter');
+    const allTrack = rows.flatMap((r) => r.track);
+    const progress = step === 2 ? h('section', { class: 'panel ck-progress' },
+      h('div', { class: 'ck-big' }, h('span', { class: 'tile-v' }, `${nDone} of ${rows.length}`), h('span', { class: 'tile-s' }, 'sites send EB and solar readings every day')),
+      h('div', { class: 'ck-bar' }, h('div', { style: `width:${rows.length ? (nDone / rows.length) * 100 : 0}%` })),
+      h('div', { class: 'ck-counts' },
+        h('span', null, h('strong', null, `${allTrack.filter((x) => x.ok && x.label.startsWith('EB')).length} of ${allTrack.filter((x) => x.label.startsWith('EB')).length}`), ' EB lines reporting'),
+        h('span', null, h('strong', null, `${allTrack.filter((x) => x.ok && x.label.startsWith('Solar')).length} of ${allTrack.filter((x) => x.label.startsWith('Solar')).length}`), ' solar systems reporting')),
+      h('p', { class: 'muted small ck-next' }, 'Tracked means a reading arrived in the last 3 days. "Stopped" means a logger is set up but readings have stopped coming.'))
+    : h('section', { class: 'panel ck-progress' },
+      h('div', { class: 'ck-big' }, h('span', { class: 'tile-v' }, `${nDone} of ${rows.length}`), h('span', { class: 'tile-s' }, 'sites have everything filled in')),
+      h('div', { class: 'ck-bar' }, h('div', { style: `width:${rows.length ? (nDone / rows.length) * 100 : 0}%` })),
+      h('div', { class: 'ck-counts' },
+        h('span', null, h('strong', null, count('eb')), ' EB numbers'), h('span', null, h('strong', null, count('bill')), ' recent bills'),
+        h('span', null, h('strong', null, count('solar')), ' solar details'), h('span', null, h('strong', null, count('spare')), ' spare items checked')),
+      h('p', { class: 'muted small ck-next' }, `Step 2, daily tracking: ${lineAll.filter((c) => fresh(lastLine.get(c.id))).length} of ${lineAll.length} EB lines and ${sysAll.filter((x) => fresh(lastSys.get(x.id))).length} of ${sysAll.length} solar systems send readings every day.`));
+
+    const pill = (c) => c.na ? null : c.ok
+      ? h('span', { class: 'ck-pill ok', title: c.why || null }, '✓ ', c.label)
+      : canWrite() ? h('button', { class: 'ck-pill miss', type: 'button', title: c.why, onclick: c.fix }, c.label) : h('span', { class: 'ck-pill miss', title: c.why }, c.label);
+    const body = h('div');
+    const draw = () => {
+      const shown = rows.filter((r) => step === 1 ? (checkState.view === 'all' || (checkState.view === 'done' ? isDone(r) : !isDone(r)))
+        : r.track.some((x) => checkState.view === 'all' || (checkState.view === 'done' ? x.ok : !x.ok)));
+      const typeOrder = ['Hostel', 'School', 'Office', 'Residence', 'Shop', 'Construction site'];
+      const types = [...new Set(shown.map((r) => r.site.site_type || 'Other'))].sort((a, b) => (typeOrder.indexOf(a) + 1 || 99) - (typeOrder.indexOf(b) + 1 || 99));
+      body.replaceChildren(shown.length ? h('div', { class: 'ck-groups' }, types.map((t) => {
+        const list = shown.filter((r) => (r.site.site_type || 'Other') === t).sort((a, b) => (isDone(a) - isDone(b)) || a.site.name.localeCompare(b.site.name, undefined, { numeric: true }));
+        return h('section', { class: 'panel dg' }, h('div', { class: 'dg-head' }, h('h2', null, t === 'Other' ? 'Not grouped yet' : t + (/s$/.test(t) ? '' : 's')), h('span', { class: 'muted' }, String(list.length))),
+          h('ul', { class: 'plain dg-list' }, list.map((r) => h('li', { class: 'ck-row' },
+            h('a', { class: 'ck-name', href: '#site/' + r.site.id }, h('span', { class: 'dot ' + (isDone(r) ? 'ok' : 'warn') }), r.site.name),
+            step === 2 ? h('ul', { class: 'plain ck-items' }, r.track.filter((x) => checkState.view === 'all' || (checkState.view === 'done' ? x.ok : !x.ok)).map((x) => h('li', { class: 'ck-item' },
+              h('div', { class: 'ck-item-main' },
+                h('span', { class: 'ck-item-name' }, h('strong', null, x.label), x.name ? h('span', { class: 'muted' }, ' · ' + x.name) : null),
+                h('span', { class: 'ck-st ' + x.st.cls }, x.st.text + (x.via ? ` · via ${x.via}` : ''))),
+              !x.ok ? h('div', { class: 'ck-why' }, x.note ? h('span', null, h('span', { class: 'muted' }, 'Why: '), x.note) : h('span', { class: 'muted' }, 'Reason not noted yet'),
+                canWrite() ? h('span', { class: 'ck-acts' },
+                  h('button', { class: 'link', onclick: () => whyDialog(x, r.site) }, x.note ? 'Change reason' : 'Add reason'),
+                  h('button', { class: 'link', onclick: () => newTask(sites, r.site.id, route, x.sysId, `Set up daily tracking: ${x.label}${x.name ? ' (' + x.name + ')' : ''}`) }, 'Make a task'),
+                  h('button', { class: 'link', onclick: x.fix }, 'Logger details')) : null) : null)))
+            : h('span', { class: 'ck-pills' }, r.checks.map(pill),
+              r.checks.find((c) => c.k === 'solar').na ? h('span', { class: 'ck-pill na' }, 'No solar') : null)))));
+      })) : h('section', { class: 'panel' }, h('p', { class: 'empty' }, checkState.view === 'done' ? 'No site is complete yet.' : step === 2 ? 'Every site sends readings every day.' : 'Every site has everything filled in.')));
+      segs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === checkState.view)));
+    };
+    const stepTabs = h('div', { class: 'segs page-tabs ck-steps' }, [[1, 'Step 1 · Site facts'], [2, 'Step 2 · Daily tracking']].map(([k, l]) =>
+      h('button', { class: 'seg', type: 'button', 'aria-pressed': String(step === k), onclick: () => { checkState.step = k; route(); } }, l)));
+    const segs = h('div', { class: 'segs page-tabs' }, (step === 2
+      ? [['missing', `Not tracked · ${allTrack.filter((x) => !x.ok).length}`], ['done', `Tracked · ${allTrack.filter((x) => x.ok).length}`], ['all', 'All']]
+      : [['missing', `Still missing · ${rows.filter((r) => !isDone(r)).length}`], ['done', `Complete · ${nDone}`], ['all', 'All']]).map(([v, l]) =>
+      h('button', { class: 'seg', type: 'button', 'data-v': v, onclick: () => { checkState.view = v; draw(); } }, l)));
+    draw();
+    main.replaceChildren(
+      pageHead('Checklist', step === 2 ? 'Every solar system and EB line that does not send daily readings yet, with the reason. Note why, then make a task to fix it.' : 'What is still missing at each site. Click an amber item to fill it in. To add a bill, you can also send the PDF or a photo to Claude.'),
+      stepTabs, progress, segs, body);
+  }
+
+  // why an EB line or system is not tracked daily yet
+  function whyDialog(x, site) {
+    const box = h('textarea', { id: 'why-note', placeholder: 'For example: no logger fitted yet; inverter has no WiFi; waiting for the electrician; app login not known' }, x.note || '');
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      await q(sb.from(x.table).update({ tracking_note: box.value.trim() || null }).eq('id', x.key));
+      closeDialog(); toast('Reason saved'); route();
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, `Why is ${x.label} not tracked? · ${site.name}`), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('div', { class: 'form-grid' }, field('Reason and what is being done', box, 'wide')),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
+  }
+
+  // spare equipment kept at a site; "nothing spare" also counts as checked
+  function spareDialog(site) {
+    const extra = h('textarea', { id: 'sp-extra', placeholder: 'For example: 68 panels of 325 W, one 5 kW inverter, 4 batteries in storage' }, site.extra_items && site.extra_items !== 'None' ? site.extra_items : '');
+    const save = async (val) => { await q(sb.from('solar_sites').update({ extra_items: val }).eq('id', site.id)); closeDialog(); toast('Saved'); route(); };
+    openDialog(h('form', { class: 'dlg', onsubmit: (e) => { e.preventDefault(); if (!extra.value.trim()) { extra.focus(); return; } save(extra.value.trim()); } },
+      h('div', { class: 'dlg-head' }, h('h2', null, 'Spare items · ' + site.name), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('p', { class: 'muted' }, 'Panels, inverters, batteries or other solar equipment kept at this site and not in use.'),
+      h('div', { class: 'form-grid' }, field('What is spare here', extra, 'wide')),
+      h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn', onclick: () => save('None') }, 'Nothing spare here'), h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
   }
 
   /* ---------- dashboard: every site at a glance ---------- */
@@ -721,10 +906,10 @@
       h('div', { class: 'actions' }, btn)));
   }
 
-  function newTask(sites, presetSite, onDone, presetSys) {
+  function newTask(sites, presetSite, onDone, presetSys, presetReason) {
     const site = select('ta-site', presetSite || '', [['', 'Choose a site'], ...sites.map((x) => [x.id, x.name])]);
     site.required = true;
-    const reason = input('ta-reason', '', { required: true, placeholder: 'For example: clean panels, fix earthing, replace battery cables' });
+    const reason = input('ta-reason', presetReason || '', { required: true, placeholder: 'For example: clean panels, fix earthing, replace battery cables' });
     const details = h('textarea', { id: 'ta-details' });
     const due = input('ta-due', addDays(today(), 7), { type: 'date', required: true });
     const assigned = input('ta-assigned', '');
@@ -1224,7 +1409,7 @@
     const methods = (await q(sb.from('solar_tracking_methods').select('name').order('sort'))).map((m) => m.name);
     const tracking = select('eb-tracking', c ? c.tracking : 'Pending', ['Live', 'Pending', 'Not installed', 'Retired']);
     const via = select('eb-via', c ? c.tracked_via : 'Not tracked yet', methods);
-    const device = input('eb-device', c && c.source_id, { placeholder: 'Meter or device ID' });
+    const device = input('eb-device', c && c.source_id, { placeholder: 'Our logger: site · EB meters, e.g. Hostel 2 · EB 1 + EB 2' });
     const target = input('eb-target', c && c.daylight_target_kwh, { type: 'number', step: 'any', min: 0 });
     const incharge = input('eb-incharge', c && c.incharge, { placeholder: 'Who handles this line' });
     const phone = input('eb-phone', c && c.contact_phone, { type: 'tel' });
@@ -1364,7 +1549,7 @@
     const kw = input('sy-kw', s && s.rated_kw, { type: 'number', step: 'any', min: 0 });
     const tracking = select('sy-tracking', s ? s.tracking : 'Pending', ['Live', 'Pending', 'Not installed', 'Retired']);
     const via = select('sy-via', s ? s.tracked_via : 'Not tracked yet', methods.map((m) => m.name));
-    const source = input('sy-source', s && s.source_id, { placeholder: 'Device ID or station ID' });
+    const source = input('sy-source', s && s.source_id, { placeholder: 'Our logger: site · solar meter, e.g. Hostel 2 · Solar 1' });
     const inv = specEditor('sy-inv', s && s.inverter_spec, [{ key: 'kw', label: 'kW each' }, { key: 'count', label: 'Number' }]);
     const pan = specEditor('sy-pan', s && s.panel_spec, [{ key: 'watt', label: 'Watts each' }, { key: 'count', label: 'Number' }]);
     const bat = specEditor('sy-bat', s && s.battery_spec, [{ key: 'ah', label: 'Ah each' }, { key: 'volt', label: 'Volts each' }, { key: 'count', label: 'Number' }, { key: 'type', label: 'Type', options: ['Lead-acid', 'Lithium', 'Lithium 51.2 V', 'Other'] }]);
