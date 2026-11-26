@@ -545,3 +545,16 @@ td.day-events { width: 55%; }
 .step-fig { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .step-next { margin: 0; line-height: 1.45; }
 .dash-sub { margin: 6px 0 -10px; font-size: 1.05rem; color: var(--muted); }
+
+/* spoken-Tamil help lines */
+.ta { display: block; font-size: .78em; font-weight: 400; line-height: 1.35; color: var(--muted); letter-spacing: 0; text-transform: none; font-family: 'Noto Sans Tamil', 'Latha', var(--body, system-ui), sans-serif; }
+button .ta, .seg .ta, .btn .ta { color: inherit; opacity: .8; }
+.seg[aria-pressed="true"] .ta { color: inherit; }
+nav.side a .ta { font-size: .72rem; opacity: .75; color: inherit; }
+nav.side a .count { vertical-align: top; }
+.page-head h1 .ta { font-size: .5em; margin-top: 2px; }
+.page-head p .ta { font-size: .95em; margin-top: 4px; }
+.tk-kind .ta { font-size: .9em; }
+.ck-pill .ta { display: inline; margin-left: 6px; }
+.ta-toggle { font-size: .85rem; text-align: left; }
+@media (max-width: 720px) { nav.side a .ta { display: none; } }

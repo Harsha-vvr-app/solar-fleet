@@ -75,6 +75,8 @@
     state.settings = Object.fromEntries(s.map((r) => [r.key, r.value]));
     $('#login').hidden = true; $('#app').hidden = false;
     $('#who').textContent = state.me.name + ' · ' + state.me.role;
+    // staff see spoken-Tamil help lines by default; anyone can switch them off from the menu
+    if (window.SolarTamil && !state.taStarted) { state.taStarted = true; SolarTamil.start(state.me.role !== 'owner'); $('#ta-toggle').addEventListener('click', () => SolarTamil.toggle()); }
     route();
     refreshCounts();
   }
