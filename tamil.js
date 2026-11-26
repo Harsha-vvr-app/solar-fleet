@@ -116,6 +116,7 @@
 
   // text that carries a number or a date: match the start, translate the meaning
   const PATTERNS = [
+    [/^due \d/, 'கட்ட வேண்டிய தேதி'],
     [/^Open · \d+$/, 'பாக்கி இருக்கு'],
     [/^Done · \d+$/, 'முடிஞ்சது'],
     [/^Questions · \d+$/, 'கேள்விகள்'],

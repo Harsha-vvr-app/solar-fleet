@@ -763,7 +763,7 @@
         h('section', { class: 'panel' }, h('div', { class: 'sec-head' }, h('h2', null, 'Bills'), canWrite() ? h('button', { class: 'btn', onclick: async () => uploadBill(await loadSites(), id) }, 'Upload a bill') : null),
           bills.length ? h('ul', { class: 'plain dg-list' }, bills.map((b) => h('li', null, h('button', { class: 'dg-row link-row', onclick: () => billDetail(b) },
             h('span', { class: 'dot ' + (payState(b) === 'overdue' ? 'bad' : b.status === 'Submitted' || isUnpaid(b) ? 'warn' : 'ok') }),
-            h('span', { class: 'dg-name' }, `${monthOf(b)} · ${n0(billUnits(b))} units · ${rupees(b.amount)}`),
+            h('span', { class: 'dg-name' }, `${monthOf(b)} · ${n0(billUnits(b))} units · ${rupees(b.amount)}`, b.due_date ? h('span', { class: 'dg-sub' }, `due ${fmtDate(b.due_date)}${b.paid && b.paid_on ? ' · paid ' + fmtDate(b.paid_on) : ''}`) : null),
             h('span', { class: 'dg-state' + (payState(b) === 'overdue' ? ' bad' : '') }, b.status === 'Submitted' ? 'to approve' : b.status === 'Rejected' ? 'rejected' : isUnpaid(b) ? (payState(b) === 'overdue' ? 'overdue' : 'not paid') : 'paid'),
             h('span', { class: 'dg-go', 'aria-hidden': 'true' }, '›')))))
             : h('p', { class: 'muted' }, 'No bills entered yet.'))];
@@ -1151,7 +1151,7 @@
       [['todo', `To do · ${waiting.length + toPay.filter((b) => b.status !== 'Submitted').length}`], ['all', 'All bills']].map(([k, l]) =>
         h('button', { class: 'seg', type: 'button', 'aria-pressed': String(view === k), onclick: () => { billState.view = k; route(); } }, l)));
     const line = (b, right, cls) => h('li', null, h('button', { class: 'dg-row link-row', onclick: () => billDetail(b) }, h('span', { class: 'dot ' + cls }),
-      h('span', { class: 'dg-name' }, `${b.site} · ${monthOf(b)}`), h('span', { class: 'dg-state' }, rupees(b.amount)),
+      h('span', { class: 'dg-name' }, `${b.site} · ${monthOf(b)}`, b.due_date ? h('span', { class: 'dg-sub' }, 'due ' + fmtDate(b.due_date)) : null), h('span', { class: 'dg-state' }, rupees(b.amount)),
       h('span', { class: 'dg-state ' + (cls === 'bad' ? 'bad' : '') }, right), h('span', { class: 'dg-go', 'aria-hidden': 'true' }, '›')));
     const payList = toPay.filter((b) => b.status !== 'Submitted');
     const todo = [
@@ -1307,7 +1307,7 @@
     openDialog(h('div', { class: 'dlg' },
       h('div', { class: 'dlg-head' }, h('h2', null, title), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
       h('div', { class: 'form-grid' },
-        kv('Consumer number', b.service_no || '—'), kv('Bill date', fmtDate(b.bill_date)),
+        kv('Consumer number', b.service_no || '—'), kv('Bill date', fmtDate(b.bill_date)), kv('Due date', b.due_date ? fmtDate(b.due_date) : '—'),
         kv('Period', b.period_from ? `${fmtDate(b.period_from)} to ${fmtDate(b.period_to)}` : '—'),
         kv('Units imported', n0(b.import_kwh)), kv('Units exported', n0(b.export_kwh)), kv('Units billed', n0(b.billed_kwh)),
         kv('Amount', b.amount == null ? '—' : '₹' + d3.format(',.0f')(b.amount)),

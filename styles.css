@@ -563,3 +563,4 @@ nav.side a .count { vertical-align: top; }
 .btn.danger:disabled { opacity: .45; cursor: not-allowed; }
 .btn.danger-ghost { color: var(--bad); border-color: transparent; background: none; }
 .btn.danger-ghost:hover { border-color: var(--bad); }
+.dg-sub { display: block; font-size: .78rem; color: var(--muted); }
