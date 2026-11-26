@@ -311,6 +311,43 @@
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
   }
 
+  // remove a site that is no longer ours: only when it holds no bills or readings, and only after typing its name
+  async function deleteSite(site) {
+    const [sys, lines] = await Promise.all([
+      q(sb.from('solar_systems').select('id').eq('site_id', site.id)),
+      q(sb.from('solar_eb_connections').select('id').eq('site_id', site.id)),
+    ]);
+    const sysIds = sys.map((x) => x.id), lineIds = lines.map((c) => c.id);
+    const [bills, gen, imp] = await Promise.all([
+      q(sb.from('solar_eb_bills').select('id').eq('site_id', site.id).limit(1)),
+      sysIds.length ? q(sb.from('solar_generation').select('date').in('system_id', sysIds).limit(1)) : [],
+      lineIds.length ? q(sb.from('solar_eb_import').select('date').in('eb_connection_id', lineIds).limit(1)) : [],
+    ]);
+    if (bills.length || gen.length || imp.length) {
+      openDialog(h('div', { class: 'dlg' }, h('div', { class: 'dlg-head' }, h('h2', null, 'This site can\'t be deleted'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
+        h('p', null, `${site.name} has ${[bills.length ? 'bills' : null, gen.length || imp.length ? 'daily readings' : null].filter(Boolean).join(' and ')} saved. Deleting it would lose that history. Ask Claude if you still want it removed.`)));
+      return;
+    }
+    const typed = input('del-name', '', { placeholder: site.name, autocomplete: 'off' });
+    const go = h('button', { class: 'btn danger', type: 'submit', disabled: true }, 'Delete for good');
+    typed.addEventListener('input', () => { go.disabled = typed.value.trim().toLowerCase() !== site.name.trim().toLowerCase(); });
+    openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+      e.preventDefault();
+      if (go.disabled) return;
+      go.disabled = true;
+      const orTickets = [`site_id.eq.${site.id}`, ...(sysIds.length ? [`system_id.in.(${sysIds.map((x) => '"' + x + '"').join(',')})`] : [])].join(',');
+      await q(sb.from('solar_tickets').delete().or(orTickets));
+      if (sysIds.length) await q(sb.from('solar_systems').delete().in('id', sysIds));
+      if (lineIds.length) await q(sb.from('solar_eb_connections').delete().in('id', lineIds));
+      await q(sb.from('solar_sites').delete().eq('id', site.id));
+      closeDialog(); toast(site.name + ' deleted'); refreshCounts(); location.hash = 'overview';
+    } },
+      h('div', { class: 'dlg-head' }, h('h2', null, 'Delete ' + site.name + '?'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+      h('p', null, `This removes the site, its ${plural(lineIds.length, 'EB line')}, ${plural(sysIds.length, 'solar system')} and their tickets. It cannot be undone.`),
+      h('div', { class: 'form-grid' }, field('Type the site name to confirm', typed, 'wide')),
+      h('div', { class: 'actions' }, go)));
+  }
+
   // spare equipment kept at a site; "nothing spare" also counts as checked
   function spareDialog(site) {
     const extra = h('textarea', { id: 'sp-extra', placeholder: 'For example: 68 panels of 325 W, one 5 kW inverter, 4 batteries in storage' }, site.extra_items && site.extra_items !== 'None' ? site.extra_items : '');
@@ -624,7 +661,8 @@
     // side panels
     const c = capSum(solar);
     const kv = (k, v) => (v ? h('div', { class: 'kv' }, h('span', { class: 'muted' }, k), h('span', null, v)) : null);
-    const details = h('section', { class: 'panel side-panel' }, h('div', { class: 'sec-head' }, h('h3', null, 'Details'), canWrite() ? h('button', { class: 'btn small', onclick: () => editSite(site, sites) }, 'Edit site') : null),
+    const details = h('section', { class: 'panel side-panel' }, h('div', { class: 'sec-head' }, h('h3', null, 'Details'), canWrite() ? h('button', { class: 'btn small', onclick: () => editSite(site, sites) }, 'Edit site') : null,
+      isOwner() ? h('button', { class: 'btn small danger-ghost', onclick: () => deleteSite(site) }, 'Delete site') : null),
       kv('Type', site.site_type), kv('Address', site.address),
       ...lines.flatMap((l) => [kv(lines.length > 1 ? `Consumer no. (${l.label})` : 'Consumer no.', l.service_no), kv('Sanctioned', l.sanctioned_kw != null ? l.sanctioned_kw + ' kW' : null), kv('Tariff', l.tariff),
         kv('In charge', l.incharge), l.contact_phone ? h('div', { class: 'kv' }, h('span', { class: 'muted' }, 'Mobile'), h('a', { href: 'tel:' + l.contact_phone }, l.contact_phone)) : null]),

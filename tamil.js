@@ -62,6 +62,8 @@
     'Continue →': 'தொடருங்க →',
     'Submit for approval': 'Approve-க்கு அனுப்பு',
     'Add a system': 'புது system சேர்',
+    'Delete site': 'Site-அ நீக்கு',
+    'Delete for good': 'நிரந்தரமா நீக்கு',
 
     // tabs and switches
     'Summary': 'சுருக்கம்',

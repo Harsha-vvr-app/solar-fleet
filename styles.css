@@ -558,3 +558,8 @@ nav.side a .count { vertical-align: top; }
 .ck-pill .ta { display: inline; margin-left: 6px; }
 .ta-toggle { font-size: .85rem; text-align: left; }
 @media (max-width: 720px) { nav.side a .ta { display: none; } }
+
+.btn.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.btn.danger:disabled { opacity: .45; cursor: not-allowed; }
+.btn.danger-ghost { color: var(--bad); border-color: transparent; background: none; }
+.btn.danger-ghost:hover { border-color: var(--bad); }
