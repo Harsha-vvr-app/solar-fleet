@@ -632,3 +632,34 @@ nav.side a .count { vertical-align: top; }
 .help p { flex-basis: 100%; max-width: 620px; margin: 8px 0 0; color: var(--muted); }
 .help[open] { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0; margin-top: 0; }
 .ck-counts, .ck-next, .step-next { display: none !important; }
+
+/* ===== format refresh: one column, clear badges, calmer spacing ===== */
+main { max-width: 1180px; gap: 22px; }
+body { font-size: 16px; }
+.page-head { align-items: center; }
+.dg-groups, .tk-groups { grid-template-columns: 1fr; gap: 16px; }
+.panel.dg { padding: 14px 20px 8px; }
+.dg-head { padding-bottom: 10px; border-bottom: 1px solid var(--line); margin-bottom: 2px; align-items: center; }
+.dg-head h2 { font-size: 1.1rem; }
+.dg-head > .muted { background: var(--bg); border-radius: 999px; padding: 0 9px; font-size: .8rem; font-weight: 600; }
+.dg-count { padding: 2px 10px; border-radius: 999px; }
+.dg-count.bad { background: var(--bad-soft); } .dg-count.warn { background: color-mix(in srgb, var(--warn) 14%, var(--panel)); }
+.dg-row, .tk-row { padding: 12px 4px; border-radius: 6px; }
+.dg-row:hover, .tk-row:hover { background: var(--bg); }
+.dg-list li + li, .tk-list li + li { border-top: 1px solid var(--line); }
+.dg-name, .tk-reason { font-weight: 500; }
+/* status as a coloured badge so it can be seen at a glance */
+.dg-state.bad, .dg-state.warn, .dg-state.ok, .tk-due.due-bad { padding: 3px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+.dg-state.bad, .tk-due.due-bad { color: var(--bad); background: var(--bad-soft); }
+.dg-state.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, var(--panel)); }
+.dg-state.ok { color: var(--ok); background: var(--ok-soft); }
+.tk-kind { width: auto; min-width: 64px; text-align: center; padding: 3px 8px; border-radius: 999px; background: var(--bg); }
+.tk-kind.k-fault, .tk-kind.k-complaint { background: var(--bad-soft); }
+.tk-kind.k-issue { background: color-mix(in srgb, var(--warn) 14%, var(--panel)); }
+/* tiles: number first, label under it */
+.tiles { gap: 14px; }
+.tile { padding: 16px 18px; }
+.tile-v { font-size: 2.2rem; }
+.page-tabs { margin-bottom: -6px; }
+.seg { padding: 7px 14px; }
+@media (max-width: 640px) { main { padding: 18px 14px 40px; } .tile-v { font-size: 1.8rem; } }
