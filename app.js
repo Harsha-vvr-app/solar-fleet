@@ -1348,6 +1348,9 @@
       due: input('bl-due', presetMonth ? addDays(presetMonth + '-01', 20) : '', { type: 'date' }),
       file: input('bl-file', '', { type: 'file', accept: 'application/pdf,image/*', required: true }),
       notes: h('textarea', { id: 'bl-notes' }),
+      pf: input('bl-pf', '', { type: 'number', step: 'any', min: 0, placeholder: '0' }), ed: input('bl-ed', '', { type: 'number', step: 'any', min: 0, placeholder: '0' }),
+      late: input('bl-late', '', { type: 'number', step: 'any', min: 0, placeholder: '0' }), pfv: input('bl-pfv', '', { type: 'number', step: 'any', min: 0, max: 1, placeholder: 'e.g. 0.86' }),
+      kw: input('bl-kw', '', { type: 'number', step: 'any', min: 0 }),
     };
     conn.addEventListener('change', () => { const c = conns.find((x) => String(x.id) === conn.value); if (c && c.service_no && !f.service.value) f.service.value = c.service_no; });
     if (presetSite) setTimeout(fillConns);
@@ -1375,6 +1378,7 @@
           site: site.name + (c ? ' · ' + c.label : ''), service_no: f.service.value.trim() || null,
           bill_date: f.billDate.value || null, period_from: f.from.value || null, period_to: f.to.value || null,
           import_kwh: num(f.imp), export_kwh: num(f.exp), billed_kwh: num(f.billed), amount: num(f.amount), due_date: f.due.value || null,
+          pf_penalty: num(f.pf), excess_demand: num(f.ed), late_fee: num(f.late), power_factor: num(f.pfv), demand_kw: num(f.kw),
           file_path: path, file_name: file.name, notes: f.notes.value.trim() || null,
           uploaded_by: state.user.id, uploaded_by_name: state.me.name }));
         closeDialog(); toast('Bill submitted for approval'); refreshCounts(); route();
@@ -1389,9 +1393,40 @@
         field('Period from', f.from), field('Period to', f.to),
         field('Units imported (kWh)', f.imp), field('Units exported (kWh)', f.exp),
         field('Units billed (kWh)', f.billed), field('Amount (₹)', f.amount), field('Pay by (due date)', f.due),
+        h('div', { class: 'field wide form-sub' }, h('strong', null, 'Penalties on the bill'), h('span', { class: 'muted small' }, ' Look for these lines on the bill. Leave blank if they are not there.')),
+        field('Power factor penalty (₹)', f.pf), field('Excess demand charge (₹)', f.ed), field('Late payment fee (₹)', f.late),
+        field('Power factor (PF)', f.pfv), field('Recorded demand (kW)', f.kw),
         field('Bill file (PDF or photo)', f.file, 'wide'), field('Notes', f.notes, 'wide')),
       h('div', { class: 'actions' }, btn));
     openDialog(form);
+  }
+
+  // the plain-words check shown on top of a bill: last bill, penalties, anything odd
+  function billCheck(b, earlier, conn) {
+    const units = (x) => (x ? +(x.billed_kwh ?? x.import_kwh) : null);
+    const pct = (a, p) => (a != null && p ? Math.round(((a - p) / p) * 100) : null);
+    const prev = earlier[0];
+    const myDate = b.period_to || b.bill_date;
+    const yearAgo = earlier.find((x) => myDate && (x.period_to || x.bill_date) && Math.abs(dayDiff(myDate, x.period_to || x.bill_date) - 365) <= 25);
+    const pens = [['Power factor penalty', b.pf_penalty, b.power_factor ? `PF ${b.power_factor}` : null], ['Excess demand charge', b.excess_demand, b.demand_kw ? `demand ${b.demand_kw} kW${conn && conn.sanctioned_kw ? ' on ' + conn.sanctioned_kw + ' kW sanctioned' : ''}` : null], ['Late payment fee', b.late_fee, null]]
+      .filter(([, v]) => +v > 0).map(([k, v, why]) => `${k} ${rupees(v)}${why ? ' (' + why + ')' : ''}`);
+    const flags = [];
+    const du = pct(units(b), units(prev)), da = pct(+b.amount, prev && +prev.amount);
+    if (du != null && du >= 30) flags.push(`Units up ${du}% on the last bill`);
+    else if (du != null && du <= -40) flags.push(`Units down ${-du}% on the last bill. Check the meter reading.`);
+    if (da != null && da >= 30 && !(du != null && du >= 30)) flags.push(`Amount up ${da}% though units did not rise as much`);
+    const rate = units(b) ? +b.amount / units(b) : null, rateP = prev && units(prev) ? +prev.amount / units(prev) : null;
+    if (rate && rateP && rate > rateP * 1.2) flags.push(`Cost per unit up from ₹${rateP.toFixed(1)} to ₹${rate.toFixed(1)}`);
+    const yu = pct(units(b), units(yearAgo));
+    if (yu != null && yu >= 40) flags.push(`Units up ${yu}% on the same bill last year`);
+    if (conn && conn.sanctioned_kw && +b.demand_kw > +conn.sanctioned_kw && !(+b.excess_demand > 0)) flags.push(`Demand ${b.demand_kw} kW is above the ${conn.sanctioned_kw} kW sanctioned`);
+    if (b.power_factor && +b.power_factor < 0.9 && !(+b.pf_penalty > 0)) flags.push(`Power factor is low at ${b.power_factor}`);
+    if (prev && +prev.export_kwh > 0 && !(+b.export_kwh > 0)) flags.push('No units exported this time, though the last bill had export. Check the solar.');
+    if (b.period_from && b.period_to && dayDiff(b.period_to, b.period_from) > 70) flags.push(`Bill covers ${dayDiff(b.period_to, b.period_from)} days, longer than usual`);
+    if (earlier.some((x) => x.bill_date && x.bill_date === b.bill_date)) flags.push('Another bill on this line has the same bill date. It may be a duplicate.');
+    if (earlier.some((x) => x.status !== 'Rejected' && !x.paid && x.due_date && x.due_date < (b.bill_date || today()))) flags.push('An earlier bill on this line is not marked paid');
+    if (!b.file_path) flags.push('No bill file attached');
+    return { prev, units, pct, pens, flags };
   }
 
   async function billDetail(b) {
@@ -1402,7 +1437,7 @@
     }
     // context: earlier bills on the same line, your last comment, and notes on the line, site and systems
     const [prevBills, conn, site, sysList, tasks, siteConns] = await Promise.all([
-      b.eb_connection_id || b.site_id ? q(sb.from('solar_eb_bills').select('id, period_to, bill_date, uploaded_at, billed_kwh, import_kwh, amount, status, review_note, reviewed_at, reviewed_by_name')
+      b.eb_connection_id || b.site_id ? q(sb.from('solar_eb_bills').select('id, period_from, period_to, bill_date, due_date, uploaded_at, billed_kwh, import_kwh, export_kwh, amount, status, paid, review_note, reviewed_at, reviewed_by_name, pf_penalty, excess_demand, late_fee, power_factor, demand_kw')
         .eq(b.eb_connection_id ? 'eb_connection_id' : 'site_id', b.eb_connection_id || b.site_id).neq('id', b.id).order('period_to', { ascending: false }).limit(24)) : Promise.resolve([]),
       b.eb_connection_id ? q(sb.from('solar_eb_connections').select('*').eq('id', b.eb_connection_id).maybeSingle()) : Promise.resolve(null),
       b.site_id ? q(sb.from('solar_sites').select('*').eq('id', b.site_id).maybeSingle()) : Promise.resolve(null),
@@ -1465,8 +1500,29 @@
       : [h('strong', null, b.due_date ? `${ps === 'overdue' ? 'Not paid. Was due' : 'Not paid yet. Due'} ${fmtDate(b.due_date)}` : 'Not paid yet'),
         b.status !== 'Approved' ? h('span', { class: 'muted' }, 'Pay once Harsha approves it.')
           : canWrite() ? h('span', { class: 'pay-act' }, h('label', { for: 'bd-paid', class: 'muted' }, 'Paid on'), payDate, paidFrom, paidRef, h('button', { class: 'btn', onclick: () => setPaid(true) }, 'Mark as paid')) : null]);
+    const ck = billCheck(b, earlier, conn);
+    const chg = (a, p) => { const v = ck.pct(a, p); return v == null ? '' : ` (${v > 0 ? '+' : ''}${v}%)`; };
+    const quick = h('section', { class: 'quick' },
+      h('div', { class: 'quick-figs' },
+        h('div', null, h('span', { class: 'q-l' }, 'This bill'), h('span', { class: 'q-v' }, rupees(b.amount)), h('span', { class: 'q-s' }, `${n0(ck.units(b))} units${b.due_date ? ' · due ' + fmtDay(b.due_date) : ''}`)),
+        h('div', null, h('span', { class: 'q-l' }, ck.prev ? `Last bill · ${monthOf(ck.prev)}` : 'Last bill'), h('span', { class: 'q-v' }, ck.prev ? rupees(ck.prev.amount) : '—'),
+          h('span', { class: 'q-s' }, ck.prev ? `${n0(ck.units(ck.prev))} units · this one${chg(ck.units(b), ck.units(ck.prev))} on units` : 'No earlier bill here'))),
+      h('div', { class: 'quick-row ' + (ck.pens.length ? 'bad' : 'ok') }, h('strong', null, 'Penalty: '), ck.pens.length ? ck.pens.join(' · ') : 'None'),
+      h('div', { class: 'quick-row ' + (ck.flags.length ? 'warn' : 'ok') }, h('strong', null, ck.flags.length ? 'Looks off:' : 'Anything odd: '),
+        ck.flags.length ? h('ul', null, ck.flags.map((f) => h('li', null, f))) : 'Nothing unusual'),
+      comments.length ? h('div', { class: 'quick-row note' }, h('strong', null, isOwner() ? 'Your last comment: ' : 'Harsha\'s last comment: '), `“${comments[0].review_note}” (${monthOf(comments[0])} bill)`) : null);
+    const decide = isOwner() && b.status === 'Submitted' ? [h('div', { class: 'form-grid' }, field('Your comment', note, 'wide')),
+      h('div', { class: 'actions' }, h('button', { class: 'btn reject', onclick: () => review('Rejected') }, 'Reject'), h('button', { class: 'btn approve', onclick: () => review('Approved') }, 'Approve'))] : [];
     openDialog(h('div', { class: 'dlg' },
       h('div', { class: 'dlg-head' }, h('h2', null, title), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
+      quick,
+      ...decide,
+      b.status === 'Approved' ? h('div', { class: 'approved-bar' }, h('strong', null, '✓ Approved for accounts'),
+        h('a', { class: 'btn', href: '#slip/' + b.id, onclick: closeDialog }, 'Print approval slip')) : null,
+      payRow,
+      b.review_note && b.status !== 'Submitted' ? h('p', null, 'Your comment: ' + b.review_note) : null,
+      link ? h('p', null, h('a', { href: link, target: '_blank', rel: 'noopener' }, 'Open the bill file')) : null,
+      h('details', { class: 'more-details' }, h('summary', null, 'Full bill details and site history'),
       h('div', { class: 'form-grid' },
         kv('Consumer number', b.service_no || '—'), kv('Bill date', fmtDate(b.bill_date)), kv('Due date', b.due_date ? fmtDate(b.due_date) : '—'),
         kv('Period', b.period_from ? `${fmtDate(b.period_from)} to ${fmtDate(b.period_to)}` : '—'),
@@ -1474,17 +1530,10 @@
         kv('Amount', b.amount == null ? '—' : '₹' + d3.format(',.0f')(b.amount)),
         kv('Uploaded', `${b.uploaded_by_name || ''} · ${d3.timeFormat('%-d %b %Y')(new Date(b.uploaded_at))}`),
         kv('Status', b.status === 'Submitted' ? 'Awaiting approval' : b.status === 'Approved' ? `Approved${b.reviewed_by_name ? ' by ' + b.reviewed_by_name : ''}${b.reviewed_at ? ' · ' + fmtDate(istDate(b.reviewed_at)) : ''}` : b.status),
-        kv('Company', co ? co.name : 'Not set'), kv('Pay from', co && co.pay_account ? co.pay_account : '—')),
-      b.status === 'Approved' ? h('div', { class: 'approved-bar' }, h('strong', null, '✓ Approved for accounts'),
-        h('a', { class: 'btn', href: '#slip/' + b.id, onclick: closeDialog }, 'Print approval slip')) : null,
-      payRow,
+        kv('Company', co ? co.name : 'Not set'), kv('Pay from', co && co.pay_account ? co.pay_account : '—'),
+        kv('Power factor', b.power_factor ?? '—'), kv('Recorded demand', b.demand_kw != null ? b.demand_kw + ' kW' : '—')),
       b.notes ? h('p', null, b.notes) : null,
-      link ? h('p', null, h('a', { href: link, target: '_blank', rel: 'noopener' }, 'Open the bill file')) : h('p', { class: 'muted' }, 'No file attached.'),
-      context,
-      isOwner() && b.status === 'Submitted' ? h('div', { class: 'form-grid' }, field('Your comment', note, 'wide')) : (b.review_note ? h('p', null, 'Your comment: ' + b.review_note) : null),
-      isOwner() && b.status === 'Submitted' ? h('div', { class: 'actions' },
-        h('button', { class: 'btn reject', onclick: () => review('Rejected') }, 'Reject'),
-        h('button', { class: 'btn approve', onclick: () => review('Approved') }, 'Approve')) : null));
+      context)));
   }
 
   /* ---------- daylight grid import ---------- */

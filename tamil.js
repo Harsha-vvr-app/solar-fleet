@@ -6,6 +6,14 @@
   // exact English text -> everyday spoken Tamil
   const T = {
     // bill desk
+    'This bill': 'இந்த பில்',
+    'Last bill': 'போன பில்',
+    'Penalties on the bill': 'பில்ல அபராதம் (penalty)',
+    'Power factor penalty (₹)': 'PF அபராதம் (₹)',
+    'Excess demand charge (₹)': 'அதிக load அபராதம் (₹)',
+    'Late payment fee (₹)': 'லேட்டா கட்டுன அபராதம் (₹)',
+    'Recorded demand (kW)': 'பதிவான load (kW)',
+    'Full bill details and site history': 'முழு பில் விவரம்',
     'This week': 'இந்த வாரம்',
     'Sites and due dates': 'Site & பில் கட்ட வேண்டிய தேதி',
     'Bill due': 'பில் கட்ட வேண்டியது',

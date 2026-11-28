@@ -605,3 +605,20 @@ nav.side a .count { vertical-align: top; }
 .desk-list .dg-sub { white-space: normal; }
 .dg-state.ok { color: var(--ok); font-weight: 600; }
 @media (max-width: 640px) { .desk-list .dg-row { flex-wrap: wrap; } .desk-list .dg-name { flex-basis: calc(100% - 30px); } .desk-list .dg-state { margin-left: 20px; } }
+/* bill window: the quick check on top */
+.quick { display: grid; gap: 8px; margin: 4px 0 14px; }
+.quick-figs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.quick-figs > div { border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; display: grid; }
+.q-l { font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.q-v { font-size: 1.35rem; font-weight: 700; }
+.q-s { font-size: .85rem; color: var(--muted); }
+.quick-row { border-radius: var(--r); padding: 8px 12px; border: 1px solid var(--line); }
+.quick-row ul { margin: 4px 0 0; padding-left: 18px; }
+.quick-row.ok { border-color: var(--ok); background: var(--ok-soft); }
+.quick-row.bad { border-color: var(--bad); background: var(--bad-soft); }
+.quick-row.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--panel)); }
+.quick-row.note { background: var(--bg); }
+.more-details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.more-details summary { cursor: pointer; font-weight: 600; margin-bottom: 10px; }
+.form-sub { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
+@media (max-width: 520px) { .quick-figs { grid-template-columns: 1fr; } }
