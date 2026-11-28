@@ -5,6 +5,27 @@
 
   // exact English text -> everyday spoken Tamil
   const T = {
+    // bill desk
+    'This week': 'இந்த வாரம்',
+    'Sites and due dates': 'Site & பில் கட்ட வேண்டிய தேதி',
+    'Bill due': 'பில் கட்ட வேண்டியது',
+    'Download and upload': 'TNEB-ல டவுன்லோட் பண்ணி இங்க அப்லோட் பண்ணுங்க',
+    'Waiting for approval': 'Harsha சார் ஓகே பண்ணணும்',
+    'Approved, to pay': 'ஓகே ஆயிடுச்சு, பணம் கட்டணும்',
+    'Approved · pay and print slip': 'ஓகே ஆயிடுச்சு · பணம் கட்டி slip பிரிண்ட் எடுங்க',
+    'pay and print slip': 'பணம் கட்டி slip பிரிண்ட் எடுங்க',
+    'Print approval slip': 'Approval slip பிரிண்ட் எடுங்க',
+    '✓ Approved for accounts': '✓ Accounts-க்கு ஓகே',
+    'Pay once Harsha approves it.': 'Harsha சார் ஓகே பண்ண அப்புறம் தான் பணம் கட்டணும்.',
+    'Mark as paid': 'பணம் கட்டியாச்சுன்னு போடுங்க',
+    'Companies': 'கம்பெனிகள்',
+    'Company and account': 'கம்பெனி & அக்கவுண்ட்',
+    'Next due': 'அடுத்த கடைசி தேதி',
+    'Usually': 'வழக்கமா',
+    'Latest bill': 'கடைசி பில்',
+    'Print': 'பிரிண்ட்',
+    "Bills due in the next 7 days come first. Download the bill from TNEB, upload it here, and it goes to Harsha to approve. Once approved, pay from the account shown and print the slip.":
+      'அடுத்த 7 நாள்ல கட்ட வேண்டிய பில் மேல இருக்கும். TNEB-ல பில் டவுன்லோட் பண்ணி இங்க அப்லோட் பண்ணுங்க. Harsha சார் ஓகே பண்ணதும், காட்டுற அக்கவுண்ட்ல இருந்து பணம் கட்டி slip பிரிண்ட் எடுங்க.',
     // menu
     'Dashboard': 'முகப்பு',
     'Checklist': 'பாக்கி வேலை லிஸ்ட்',

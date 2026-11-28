@@ -564,3 +564,44 @@ nav.side a .count { vertical-align: top; }
 .btn.danger-ghost { color: var(--bad); border-color: transparent; background: none; }
 .btn.danger-ghost:hover { border-color: var(--bad); }
 .dg-sub { display: block; font-size: .78rem; color: var(--muted); }
+
+/* bill desk: sites and due dates, approval, printable slip */
+.note-bar { background: color-mix(in srgb, var(--warn) 12%, var(--panel)); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 14px; margin: 0 0 12px; }
+.bill-desk td, .bill-desk th { vertical-align: top; }
+.bill-desk .co-select { min-width: 180px; padding: 5px 8px; }
+.due-soon { color: var(--warn); font-weight: 600; }
+.pay-act input { width: auto; min-width: 0; flex: 1 1 140px; }
+.approved-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between; background: var(--ok-soft, #E3F3E9); border: 1px solid var(--ok); border-radius: var(--r); padding: 10px 14px; margin: 10px 0; color: var(--ok); }
+.approved-bar .btn { color: var(--ink); text-decoration: none; }
+.slip-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.slip-bar .back { margin: 0; }
+.slip { max-width: 760px; background: #fff; color: #18242F; border: 1px solid var(--line); border-radius: var(--r); padding: 32px 36px; }
+.slip-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 2px solid #18242F; padding-bottom: 14px; margin-bottom: 18px; }
+.slip-head .muted { color: #5C6B78; }
+.slip-co { font-size: 1.4rem; font-weight: 700; line-height: 1.2; }
+.slip-stamp { border: 3px solid #2D8556; color: #2D8556; font-size: 1.05rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 8px 14px; border-radius: 6px; transform: rotate(-3deg); white-space: nowrap; }
+.slip-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 20px; margin: 0; }
+.slip-row dt { font-size: .8rem; color: #5C6B78; text-transform: uppercase; letter-spacing: .04em; }
+.slip-row dd { margin: 2px 0 0; font-weight: 500; }
+.slip-row.big dd { font-size: 1.25rem; font-weight: 700; }
+.slip-note { margin-top: 20px; border-left: 3px solid #2D8556; padding: 4px 0 4px 12px; }
+.slip-note h3 { margin: 0 0 4px; font-size: .85rem; color: #5C6B78; text-transform: uppercase; letter-spacing: .04em; }
+.slip-note p { margin: 0; }
+.slip-sign { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 48px; font-size: .85rem; color: #5C6B78; }
+.slip-sign span { display: block; border-bottom: 1px solid #18242F; height: 32px; margin-bottom: 4px; }
+.slip-foot { margin-top: 24px; color: #5C6B78; }
+@media (max-width: 640px) { .slip { padding: 20px; } .slip-grid { grid-template-columns: 1fr 1fr; } .slip-head { flex-direction: column; } }
+@page { margin: 15mm; }
+@media print {
+  .side, .no-print, .toast, .ta, dialog { display: none !important; }
+  .shell { display: block !important; }
+  main { padding: 0 !important; margin: 0 !important; }
+  body { background: #fff !important; }
+  .slip { border: none; max-width: none; padding: 0; }
+}
+.desk-list { display: grid; gap: 14px; max-width: 980px; }
+.desk-list .dg-row { width: 100%; text-align: left; background: none; border: 0; font: inherit; cursor: pointer; }
+.desk-list .dg-name { white-space: normal; }
+.desk-list .dg-sub { white-space: normal; }
+.dg-state.ok { color: var(--ok); font-weight: 600; }
+@media (max-width: 640px) { .desk-list .dg-row { flex-wrap: wrap; } .desk-list .dg-name { flex-basis: calc(100% - 30px); } .desk-list .dg-state { margin-left: 20px; } }

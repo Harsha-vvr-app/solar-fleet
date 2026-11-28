@@ -104,12 +104,12 @@
   }
 
   /* ---------- routing ---------- */
-  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, system: systemPage, setup, checklist, energy };
-  const SETUP_PAGES = ['sites', 'grid', 'planned', 'bulk', 'settings', 'users', 'systems', 'sitetable'];
+  const routes = { overview, tickets, ticket, bills, grid, sites: sitesPage, systems, planned, settings, users, bulk, sitetable: siteTable, site: sitePage, system: systemPage, setup, checklist, energy, companies, slip };
+  const SETUP_PAGES = ['sites', 'grid', 'planned', 'bulk', 'settings', 'users', 'systems', 'sitetable', 'companies'];
   function route() {
     const [name, arg] = (location.hash.slice(1) || 'overview').split('/');
     const fn = routes[name] || overview;
-    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : name === 'system' ? 'overview' : SETUP_PAGES.includes(name) ? 'setup' : name)));
+    document.querySelectorAll('.side a').forEach((a) => a.toggleAttribute('aria-current', a.dataset.route === (name === 'ticket' ? 'tickets' : name === 'site' ? 'overview' : name === 'system' ? 'overview' : name === 'slip' ? 'bills' : SETUP_PAGES.includes(name) ? 'setup' : name)));
     if (name !== 'sites') window.scrollTo(0, 0);
     document.querySelectorAll('.side a[aria-current]').forEach((a) => a.setAttribute('aria-current', 'page'));
     main.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
@@ -126,6 +126,7 @@
     const items = [
       ['#systems', 'Systems', 'Every solar system, by site. Open one to see its readings and complaints.'],
       ['#sitetable', 'Site table', 'All sites side by side with their last three bills.'],
+      ['#companies', 'Companies', 'Which company each site is under, and the account its EB bills are paid from.'],
       ['#sites', 'Sites and EB connections', 'Add a site, an EB connection or a solar system, and edit their details.'],
       ['#grid', 'Daylight grid import', 'Units each metered EB line takes during the day. Fills in once EB meters are fitted.'],
       ['#planned', 'Planned work', 'Tell the nightly checks about planned shutdowns so they raise no fault tickets.'],
@@ -362,7 +363,7 @@
   /* ---------- dashboard: every site at a glance ---------- */
   const dashState = { q: '', type: '', show: '' };
   const siteState = { days: 30, tab: 'summary', key: '' };
-  const billState = { view: 'todo' };
+  const billState = { view: 'week' };
   const istDate = (ts) => (ts ? new Date(Date.parse(ts) + 19800000).toISOString().slice(0, 10) : null);
   const isFault = (x) => x.tracking === 'Live' && x.attention && !['OK', 'Open item'].includes(x.attention);
   const rupees = (v) => (v == null || v === '' ? '—' : '₹' + Math.round(+v).toLocaleString('en-IN'));
@@ -1104,18 +1105,121 @@
   /* ---------- EB bills ---------- */
   // A bill belongs to the month its period ends in (or its bill date when there is no period).
   const billMonth = (b) => (b.period_to || b.bill_date || b.uploaded_at || '').slice(0, 7);
+  // typical bill timing for one EB line, worked out from its own past bills
+  const addMonths = (d, n) => {
+    const x = new Date(d + 'T00:00:00Z'), dd = x.getUTCDate();
+    x.setUTCDate(1); x.setUTCMonth(x.getUTCMonth() + n);
+    x.setUTCDate(Math.min(dd, new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + 1, 0)).getUTCDate()));
+    return x.toISOString().slice(0, 10);
+  };
+  const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
+  const ord = (n) => n + ([, 'st', 'nd', 'rd'][n % 100 > 10 && n % 100 < 14 ? 0 : n % 10] || 'th');
+  function billTiming(conn, all) {
+    const dt = (b) => b.bill_date || b.period_to;
+    const bs = all.filter((b) => b.eb_connection_id === conn.id && b.status !== 'Rejected' && dt(b)).sort((a, b) => dt(a).localeCompare(dt(b)));
+    if (!bs.length) return { conn, last: null };
+    const gaps = d3.pairs(bs).map(([a, b]) => dayDiff(dt(b), dt(a)) / 30.44).filter((m) => m > 0.5 && m < 3.5);
+    const g = gaps.length ? d3.median(gaps) : null;
+    const cycle = g == null ? 2 : g >= 1.5 ? 2 : 1;
+    const offs = bs.filter((b) => b.due_date && b.bill_date).map((b) => dayDiff(b.due_date, b.bill_date)).filter((d) => d > 0 && d < 60);
+    const offset = Math.round(offs.length ? d3.median(offs) : 20);
+    const dueDays = bs.filter((b) => b.due_date).map((b) => +b.due_date.slice(8, 10));
+    const dueDay = dueDays.length ? Math.round(d3.median(dueDays)) : null;
+    const last = bs[bs.length - 1];
+    // the latest bill is still open: that is what falls due next
+    if (isUnpaid(last)) return { conn, last, cycle, guess: g == null, offset, dueDay, open: last, nextDue: last.due_date || addDays(dt(last), offset), missed: 0 };
+    // otherwise the next bill is expected one cycle after the last; skip ahead past any that were never uploaded
+    let nextBill = addMonths(dt(last), cycle), missed = 0;
+    while (addDays(nextBill, offset) < addDays(today(), -10) && missed < 12) { nextBill = addMonths(nextBill, cycle); missed++; }
+    return { conn, last, cycle, guess: g == null, offset, dueDay, open: null, nextBill, nextDue: addDays(nextBill, offset), missed };
+  }
+  const typicalText = (t) => (t.last ? `${t.guess ? 'Probably every 2 months' : t.cycle === 1 ? 'Every month' : 'Every 2 months'}${t.dueDay ? `, due around the ${ord(t.dueDay)}` : ''}` : 'No bills yet');
+  const payFrom = (co) => (co ? co.name + (co.pay_account ? ' · ' + co.pay_account : '') : 'No company set');
+
   async function bills() {
-    const [list, sitesData] = await Promise.all([
+    const [list, sitesData, companies] = await Promise.all([
       q(sb.from('solar_eb_bills').select('*').order('uploaded_at', { ascending: false })),
       loadSites(),
+      q(sb.from('solar_companies').select('*').order('sort').order('name')),
     ]);
     const { sites, conns } = sitesData;
-    const now = today().slice(0, 7);
+    const t0 = today(), wk = addDays(t0, 7);
+    const coById = Object.fromEntries(companies.map((c) => [c.id, c]));
+    const siteById = Object.fromEntries(sites.map((s) => [s.id, s]));
+    const siteCo = (siteId) => coById[(siteById[siteId] || {}).company_id] || null;
+    const liveConns = conns.filter((c) => c.tracking !== 'Retired' && siteById[c.site_id]);
+    const multi = new Set(d3.rollups(liveConns, (v) => v.length, (c) => c.site_id).filter(([, n]) => n > 1).map(([k]) => k));
+    const lineName = (c) => siteById[c.site_id].name + (multi.has(c.site_id) ? ' · ' + c.label : '');
+    const timing = liveConns.map((c) => billTiming(c, list));
+
+    const now = t0.slice(0, 7);
     const months = d3.range(11, -1, -1).map((k) => { const d = new Date(Date.parse(now + '-01T00:00:00Z')); d.setUTCMonth(d.getUTCMonth() - k); return d.toISOString().slice(0, 7); });
     const mLabel = (m) => d3.utcFormat('%b %y')(new Date(m + '-01T00:00:00Z'));
     const waiting = list.filter((b) => b.status === 'Submitted');
     const unassigned = list.filter((b) => !b.eb_connection_id);
-    const toPay = list.filter(isUnpaid).sort((a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
+    const toPay = list.filter((b) => b.status === 'Approved' && isUnpaid(b)).sort((a, b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')));
+
+    // bill due: every line with a bill falling due in the next 7 days or already late, uploaded or not
+    const due = timing.filter((t) => t.last && t.nextDue <= wk).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
+    const dueIds = new Set(due.filter((t) => t.open).map((t) => t.open.id));
+    // unpaid bills that are late or due this week but not the newest on their line still belong here
+    list.filter((b) => isUnpaid(b) && b.due_date && b.due_date <= wk && b.eb_connection_id && !dueIds.has(b.id)).forEach((b) => {
+      const c = liveConns.find((x) => x.id === b.eb_connection_id);
+      if (c) { due.push({ conn: c, open: b, nextDue: b.due_date }); dueIds.add(b.id); }
+    });
+    due.sort((a, b) => a.nextDue.localeCompare(b.nextDue));
+
+    const row = (opts) => h('li', null, h('button', { class: 'dg-row link-row', onclick: opts.onclick }, h('span', { class: 'dot ' + opts.cls }),
+      h('span', { class: 'dg-name' }, opts.name, opts.sub ? h('span', { class: 'dg-sub' }, opts.sub) : null),
+      opts.amount != null ? h('span', { class: 'dg-state' }, opts.amount) : null,
+      h('span', { class: 'dg-state ' + (opts.cls === 'bad' ? 'bad' : opts.cls === 'ok' ? 'ok' : '') }, opts.state), h('span', { class: 'dg-go', 'aria-hidden': 'true' }, '›')));
+    const whenText = (d) => (d < t0 ? 'was due ' + fmtDay(d) : d === t0 ? 'due today' : 'due ' + fmtDay(d));
+    const dueRow = (t) => {
+      const co = siteCo(t.conn.site_id), late = t.nextDue < t0;
+      if (!t.open) return row({ cls: late ? 'bad' : 'warn', name: lineName(t.conn), sub: `${whenText(t.nextDue)} (expected) · consumer no. ${t.conn.service_no || '—'} · pay from ${payFrom(co)}`,
+        state: canWrite() ? 'Download and upload' : 'Not uploaded yet', onclick: () => (canWrite() ? uploadBill(sitesData, t.conn.site_id, t.conn.id) : null) });
+      const b = t.open;
+      return row({ cls: late ? 'bad' : b.status === 'Approved' ? 'ok' : 'warn', name: `${lineName(t.conn)} · ${monthOf(b)}`, sub: `${whenText(t.nextDue)} · pay from ${payFrom(co)}`, amount: rupees(b.amount),
+        state: b.status === 'Submitted' ? 'Waiting for approval' : 'Approved · pay and print slip', onclick: () => billDetail(b) });
+    };
+    const billRow = (b, state, cls) => row({ cls, name: `${b.site} · ${monthOf(b)}`, sub: [b.due_date ? whenText(b.due_date) : null, 'pay from ' + payFrom(siteCo(b.site_id))].filter(Boolean).join(' · '),
+      amount: rupees(b.amount), state, onclick: () => billDetail(b) });
+    const group = (title, count, items) => (items.length ? h('section', { class: 'panel dg' }, h('div', { class: 'dg-head' }, h('h2', null, title), h('span', { class: 'muted' }, count)), h('ul', { class: 'plain dg-list' }, items)) : null);
+    const waitMore = waiting.filter((b) => !dueIds.has(b.id)), payMore = toPay.filter((b) => !dueIds.has(b.id));
+    const weekView = [
+      group('Bill due', `next 7 days · ${due.length}`, due.map(dueRow)),
+      group(isOwner() ? 'Waiting for your approval' : 'Waiting for approval', String(waitMore.length), waitMore.map((b) => billRow(b, isOwner() ? 'open to approve' : 'with Harsha', 'warn'))),
+      group('Approved, to pay', rupees(d3.sum(payMore, (b) => +b.amount || 0)), payMore.map((b) => billRow(b, 'pay and print slip', 'ok'))),
+      group('Not linked to an EB line', String(unassigned.length), unassigned.map((b) => billRow(b, 'open to link', 'warn')))].filter(Boolean);
+
+    // sites: company, account, and when each line's bill usually falls due
+    const coSelect = (site) => {
+      const s = select('co-' + site.id, site.company_id || '', [['', 'Choose company'], ...companies.map((c) => [c.id, c.name])]);
+      s.classList.add('co-select'); s.setAttribute('aria-label', 'Company for ' + site.name);
+      s.addEventListener('change', async () => {
+        await q(sb.from('solar_sites').update({ company_id: s.value ? +s.value : null }).eq('id', site.id));
+        site.company_id = s.value ? +s.value : null; toast(`${site.name}: ${s.value ? coById[s.value].name : 'no company'}`);
+        const pf = s.closest('tr').querySelector('.co-pay'); if (pf) pf.textContent = (coById[s.value] || {}).pay_account || '';
+      });
+      return s;
+    };
+    const sitesView = h('section', { class: 'panel' }, h('div', { class: 'table-wrap' }, h('table', { class: 'bill-desk' },
+      h('thead', null, h('tr', null, ['Site', 'Company and account', 'Consumer no.', 'Usually', 'Next due', 'Latest bill'].map((c) => h('th', null, c)))),
+      h('tbody', null, sites.flatMap((site) => {
+        const mine = timing.filter((t) => t.conn.site_id === site.id);
+        if (!mine.length) return [];
+        const co = coById[site.company_id];
+        return mine.map((t, i) => h('tr', null,
+          h('th', { class: 'conn' }, i === 0 ? h('a', { href: '#site/' + site.id }, site.name) : null, multi.has(site.id) ? h('div', { class: 'muted small' }, t.conn.label) : null),
+          h('td', null, i === 0 ? [canWrite() && companies.length ? coSelect(site) : h('span', null, co ? co.name : '—'), h('div', { class: 'muted small co-pay' }, co ? co.pay_account || '' : '')] : null),
+          h('td', { class: 'nw' }, t.conn.service_no || '—'),
+          h('td', null, typicalText(t)),
+          h('td', { class: 'nw ' + (t.last && t.nextDue < t0 ? 'due-bad' : t.last && t.nextDue <= wk ? 'due-soon' : '') }, t.last ? fmtDate(t.nextDue) + (t.open ? '' : ' (expected)') : '—',
+            t.missed ? h('div', { class: 'small due-bad' }, `${plural(t.missed, 'bill')} not uploaded`) : null),
+          h('td', null, t.last ? h('button', { class: 'link', onclick: () => billDetail(t.last) }, `${monthOf(t.last)} · ${rupees(t.last.amount)} · ${t.last.status === 'Submitted' ? 'waiting for approval' : t.last.paid ? 'paid' : t.last.status === 'Approved' ? 'approved, not paid' : t.last.status.toLowerCase()}`)
+            : canWrite() ? h('button', { class: 'link', onclick: () => uploadBill(sitesData, site.id, t.conn.id) }, 'Upload first bill') : '—')));
+      })))));
+    const noCo = sites.filter((s) => liveConns.some((c) => c.site_id === s.id) && !s.company_id).length;
 
     const cell = (c, m) => {
       const here = list.filter((b) => b.eb_connection_id === c.id && billMonth(b) === m);
@@ -1131,45 +1235,96 @@
     const grid = h('div', { class: 'table-wrap' }, h('table', { class: 'bill-grid' },
       h('thead', null, h('tr', null, h('th', null, 'Site'), months.map((m) => h('th', { class: 'n' }, mLabel(m))))),
       h('tbody', null, sites.flatMap((site) => {
-        const mine = conns.filter((c) => c.site_id === site.id && c.tracking !== 'Retired');
+        const mine = liveConns.filter((c) => c.site_id === site.id);
         if (!mine.length) return [];
         if (mine.length === 1) return [h('tr', null, h('th', { class: 'conn' }, h('a', { href: '#site/' + site.id }, site.name)), months.map((m) => cell(mine[0], m)))];
         return [h('tr', { class: 'group' }, h('th', { colspan: months.length + 1 }, h('a', { href: '#site/' + site.id }, site.name), h('span', { class: 'muted' }, ` · ${mine.length} EB lines`))),
           ...mine.map((c) => h('tr', null, h('th', { class: 'conn sub' }, c.label), months.map((m) => cell(c, m))))];
       }))));
 
-    const plainTable = (rows) => h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, ['Site', 'Period', 'Billed kWh', 'Amount ₹', 'Status', ''].map((c, i) => h('th', { class: i === 2 || i === 3 ? 'n' : null }, c)))),
-      h('tbody', null, rows.map((b) => h('tr', null,
-        h('td', null, b.site), h('td', null, b.period_from ? `${fmtDay(b.period_from)} to ${fmtDate(b.period_to)}` : fmtDate(b.bill_date)),
-        h('td', { class: 'n' }, n0(b.billed_kwh ?? b.import_kwh)), h('td', { class: 'n' }, b.amount == null ? '—' : d3.format(',.0f')(b.amount)),
-        h('td', null, h('span', { class: 'chip ' + (b.status === 'Approved' ? 'ok' : b.status === 'Rejected' ? 'bad' : 'amber') }, b.status === 'Submitted' ? 'Awaiting approval' : b.status)),
-        h('td', null, h('button', { class: 'link', onclick: () => billDetail(b) }, 'Open')))))));
-
+    if (!['week', 'sites', 'all'].includes(billState.view)) billState.view = 'week';
     const view = billState.view;
     const segs = h('div', { class: 'segs page-tabs' },
-      [['todo', `To do · ${waiting.length + toPay.filter((b) => b.status !== 'Submitted').length}`], ['all', 'All bills']].map(([k, l]) =>
+      [['week', `This week · ${due.length + waitMore.length + payMore.length}`], ['sites', 'Sites and due dates'], ['all', 'All bills']].map(([k, l]) =>
         h('button', { class: 'seg', type: 'button', 'aria-pressed': String(view === k), onclick: () => { billState.view = k; route(); } }, l)));
-    const line = (b, right, cls) => h('li', null, h('button', { class: 'dg-row link-row', onclick: () => billDetail(b) }, h('span', { class: 'dot ' + cls }),
-      h('span', { class: 'dg-name' }, `${b.site} · ${monthOf(b)}`, b.due_date ? h('span', { class: 'dg-sub' }, 'due ' + fmtDate(b.due_date)) : null), h('span', { class: 'dg-state' }, rupees(b.amount)),
-      h('span', { class: 'dg-state ' + (cls === 'bad' ? 'bad' : '') }, right), h('span', { class: 'dg-go', 'aria-hidden': 'true' }, '›')));
-    const payList = toPay.filter((b) => b.status !== 'Submitted');
-    const todo = [
-      waiting.length ? h('section', { class: 'panel dg' }, h('div', { class: 'dg-head' }, h('h2', null, isOwner() ? 'To approve' : 'Awaiting approval'), h('span', { class: 'muted' }, String(waiting.length))),
-        h('ul', { class: 'plain dg-list' }, waiting.map((b) => line(b, 'open to approve', 'warn')))) : null,
-      payList.length ? h('section', { class: 'panel dg' }, h('div', { class: 'dg-head' }, h('h2', null, 'To pay'), h('span', { class: 'muted' }, rupees(d3.sum(payList, (b) => +b.amount || 0)))),
-        h('ul', { class: 'plain dg-list' }, payList.map((b) => line(b, b.due_date ? (payState(b) === 'overdue' ? 'overdue · ' : 'due ') + fmtDay(b.due_date) : 'not paid', payState(b) === 'overdue' ? 'bad' : 'warn')))) : null,
-      unassigned.length ? h('section', { class: 'panel dg' }, h('div', { class: 'dg-head' }, h('h2', null, 'Not linked to an EB line'), h('span', { class: 'muted' }, String(unassigned.length))),
-        h('ul', { class: 'plain dg-list' }, unassigned.map((b) => line(b, 'open to link', 'warn')))) : null].filter(Boolean);
+    const sub = {
+      week: 'Bills due in the next 7 days come first. Download the bill from TNEB, upload it here, and it goes to Harsha to approve. Once approved, pay from the account shown and print the slip.',
+      sites: 'Which company each site is under, the account to pay from, and when its bill usually falls due.',
+      all: 'One row per site, one column per month. Click a bill to open it, or + to upload one.' }[view];
     main.replaceChildren(...[
-      pageHead('EB bills', view === 'all' ? 'One row per site, one column per month. Click a bill to open it, or + to upload one.' : 'Bills that need you. Click one to approve it or mark it paid.',
-        canWrite() ? h('button', { class: 'btn primary', onclick: () => uploadBill(sitesData) }, 'Upload a bill') : null),
+      pageHead('EB bills', sub, canWrite() ? h('button', { class: 'btn primary', onclick: () => uploadBill(sitesData) }, 'Upload a bill') : null),
       segs,
       ...(view === 'all' ? [
         h('p', { class: 'legend small' }, h('span', { class: 'bill-chip ok' }, 'Approved'), h('span', { class: 'bill-chip wait' }, 'Awaiting approval'), h('span', { class: 'bill-chip ok unpaid' }, 'Not paid yet')),
         h('div', { class: 'panel' }, grid)]
-        : todo.length ? [h('div', { class: 'dg-groups' }, todo)] : [h('section', { class: 'panel' }, h('p', { class: 'empty' }, 'Nothing to approve or pay.'), h('button', { class: 'link more-link', onclick: () => { billState.view = 'all'; route(); } }, 'See all bills →'))])].filter(Boolean));
-    grid.scrollLeft = grid.scrollWidth; // newest months first in view
+        : view === 'sites' ? [
+          !companies.length ? h('p', { class: 'note-bar' }, 'No companies yet. ', h('a', { href: '#companies' }, 'Add your companies and their pay-from accounts'), ' so each site can be set to the right one.')
+            : noCo ? h('p', { class: 'note-bar' }, `${plural(noCo, 'site')} still need a company. Choose it in the Company column. `, h('a', { href: '#companies' }, 'Edit companies')) : h('p', { class: 'muted small' }, h('a', { href: '#companies' }, 'Edit companies and accounts')),
+          sitesView]
+        : weekView.length ? [h('div', { class: 'desk-list' }, weekView)]
+        : [h('section', { class: 'panel' }, h('p', { class: 'empty' }, 'No bills due in the next 7 days, and nothing waiting.'), h('button', { class: 'link more-link', onclick: () => { billState.view = 'sites'; route(); } }, 'See when each site is due →'))])].filter(Boolean));
+    if (view === 'all') grid.scrollLeft = grid.scrollWidth; // newest months first in view
+  }
+
+  /* ---------- companies: which account pays which site's bill ---------- */
+  async function companies() {
+    const [list, { sites }] = await Promise.all([q(sb.from('solar_companies').select('*').order('sort').order('name')), loadSites()]);
+    const edit = (co) => {
+      const name = input('co-name', co ? co.name : '', { required: true, placeholder: 'For example: Vaikund Estates Pvt. Ltd.' });
+      const acct = input('co-acct', co ? co.pay_account : '', { placeholder: 'Bank and last 4 digits only, e.g. HDFC current ··4321' });
+      const notes = h('textarea', { id: 'co-notes' }, co ? co.notes || '' : '');
+      openDialog(h('form', { class: 'dlg', onsubmit: async (e) => {
+        e.preventDefault();
+        if (/\d{6,}/.test(acct.value.replace(/[\s-]/g, ''))) { toast('Type only the bank and the last 4 digits, not the full account number.', true); acct.focus(); return; }
+        const row = { name: name.value.trim(), pay_account: acct.value.trim() || null, notes: notes.value.trim() || null };
+        await q(co ? sb.from('solar_companies').update(row).eq('id', co.id) : sb.from('solar_companies').insert(row));
+        closeDialog(); toast(co ? 'Company saved' : 'Company added'); route();
+      } },
+        h('div', { class: 'dlg-head' }, h('h2', null, co ? 'Edit company' : 'Add a company'), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Cancel')),
+        h('div', { class: 'form-grid' }, field('Company name', name, 'wide'), field('Pay EB bills from', acct, 'wide'), field('Notes', notes, 'wide')),
+        h('p', { class: 'muted small' }, 'This label is printed on the approval slip so accounts know which account to pay from. Keep the full account number out of here.'),
+        h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
+    };
+    main.replaceChildren(
+      pageHead('Companies', 'The company each site is under, and the account its EB bills are paid from. Set each site\'s company on the EB bills page, under Sites and due dates.',
+        canWrite() ? h('button', { class: 'btn primary', onclick: () => edit(null) }, 'Add a company') : null),
+      list.length ? h('section', { class: 'panel dg' }, h('ul', { class: 'plain dg-list' }, list.map((co) => {
+        const n = sites.filter((s) => s.company_id === co.id).length;
+        return h('li', null, h('button', { class: 'dg-row link-row', onclick: () => (canWrite() ? edit(co) : null) }, h('span', { class: 'dot ok' }),
+          h('span', { class: 'dg-name' }, co.name, h('span', { class: 'dg-sub' }, co.pay_account ? 'Pay from ' + co.pay_account : 'No pay-from account yet')),
+          h('span', { class: 'dg-state' }, plural(n, 'site')), h('span', { class: 'dg-go', 'aria-hidden': 'true' }, '›')));
+      }))) : h('section', { class: 'panel' }, h('p', { class: 'empty' }, 'No companies yet. Add one for each company that pays EB bills.')));
+  }
+
+  /* ---------- approval slip: printed for accounts once Harsha approves a bill ---------- */
+  async function slip(id) {
+    const b = await q(sb.from('solar_eb_bills').select('*').eq('id', id).maybeSingle());
+    if (!b) { main.replaceChildren(h('p', { class: 'empty' }, 'That bill was not found. ', h('a', { href: '#bills' }, 'Back to EB bills'))); return; }
+    const [site, conn] = await Promise.all([
+      b.site_id ? q(sb.from('solar_sites').select('*').eq('id', b.site_id).maybeSingle()) : null,
+      b.eb_connection_id ? q(sb.from('solar_eb_connections').select('*').eq('id', b.eb_connection_id).maybeSingle()) : null]);
+    const co = site && site.company_id ? await q(sb.from('solar_companies').select('*').eq('id', site.company_id).maybeSingle()) : null;
+    const bar = h('div', { class: 'slip-bar no-print' }, h('a', { class: 'back', href: '#bills' }, '← EB bills'),
+      b.status === 'Approved' ? h('button', { class: 'btn primary', onclick: () => window.print() }, 'Print') : null);
+    if (b.status !== 'Approved') { main.replaceChildren(bar, h('section', { class: 'panel' }, h('p', { class: 'empty' }, b.status === 'Submitted' ? 'This bill is still waiting for approval. The slip can be printed once it is approved.' : 'This bill was rejected, so there is no slip.'))); return; }
+    const r = (k, v, cls) => h('div', { class: 'slip-row ' + (cls || '') }, h('dt', null, k), h('dd', null, v ?? '—'));
+    main.replaceChildren(bar, h('article', { class: 'slip' },
+      h('header', { class: 'slip-head' },
+        h('div', null, h('div', { class: 'slip-co' }, co ? co.name : 'Company not set'), h('div', { class: 'muted' }, 'EB bill payment · slip no. ' + b.id)),
+        h('div', { class: 'slip-stamp' }, 'Approved for accounts')),
+      h('dl', { class: 'slip-grid' },
+        r('Pay from', co && co.pay_account ? co.pay_account : 'Account not set. Ask Harsha.', 'big'),
+        r('Amount', b.amount == null ? '—' : '₹' + d3.format(',.2f')(b.amount), 'big'),
+        r('Pay by', b.due_date ? fmtDate(b.due_date) : '—', 'big'),
+        r('Site', site ? site.name : b.site), r('EB line', conn ? conn.label : null), r('Consumer no.', b.service_no || (conn && conn.service_no)),
+        r('Bill date', b.bill_date ? fmtDate(b.bill_date) : null), r('Period', b.period_from ? `${fmtDate(b.period_from)} to ${fmtDate(b.period_to)}` : null),
+        r('Units billed', b.billed_kwh != null || b.import_kwh != null ? n0(billUnits(b)) : null),
+        r('Uploaded by', `${b.uploaded_by_name || '—'} · ${fmtDate(istDate(b.uploaded_at))}`),
+        r('Approved by', `${b.reviewed_by_name || 'Harsha'}${b.reviewed_at ? ' · ' + fmtDate(istDate(b.reviewed_at)) : ''}`),
+        b.paid ? r('Paid', `${b.paid_on ? fmtDate(b.paid_on) : ''}${b.paid_from ? ' from ' + b.paid_from : ''}${b.paid_ref ? ' · ref ' + b.paid_ref : ''}`) : null),
+      b.review_note ? h('div', { class: 'slip-note' }, h('h3', null, 'Note from Harsha'), h('p', null, b.review_note)) : null,
+      h('div', { class: 'slip-sign' }, ['Paid by', 'Payment ref / UTR', 'Date'].map((l) => h('div', null, h('span', null), l))),
+      h('p', { class: 'muted small slip-foot' }, `Printed ${fmtDate(today())} from Solar Fleet`)));
   }
 
   function uploadBill(sitesData, presetSite, presetConn, presetMonth) {
@@ -1247,7 +1402,7 @@
     }
     // context: earlier bills on the same line, your last comment, and notes on the line, site and systems
     const [prevBills, conn, site, sysList, tasks, siteConns] = await Promise.all([
-      b.eb_connection_id || b.site_id ? q(sb.from('solar_eb_bills').select('id, period_to, bill_date, billed_kwh, import_kwh, amount, status, review_note, reviewed_at')
+      b.eb_connection_id || b.site_id ? q(sb.from('solar_eb_bills').select('id, period_to, bill_date, uploaded_at, billed_kwh, import_kwh, amount, status, review_note, reviewed_at, reviewed_by_name')
         .eq(b.eb_connection_id ? 'eb_connection_id' : 'site_id', b.eb_connection_id || b.site_id).neq('id', b.id).order('period_to', { ascending: false }).limit(24)) : Promise.resolve([]),
       b.eb_connection_id ? q(sb.from('solar_eb_connections').select('*').eq('id', b.eb_connection_id).maybeSingle()) : Promise.resolve(null),
       b.site_id ? q(sb.from('solar_sites').select('*').eq('id', b.site_id).maybeSingle()) : Promise.resolve(null),
@@ -1255,11 +1410,12 @@
       b.site_id ? q(sb.from('solar_tickets').select('id, reason, due, type').eq('site_id', b.site_id).neq('status', 'Closed').order('due')) : Promise.resolve([]),
       b.site_id ? q(sb.from('solar_eb_connections').select('id').eq('site_id', b.site_id).neq('tracking', 'Retired')) : Promise.resolve([]),
     ]);
+    const co = site && site.company_id ? await q(sb.from('solar_companies').select('*').eq('id', site.company_id).maybeSingle()) : null;
     const multiLine = siteConns.length > 1;
     const title = site ? site.name + (multiLine && conn ? ' · ' + conn.label : '') : b.site;
     const myDate = b.period_to || b.bill_date || '';
     const earlier = prevBills.filter((x) => (x.period_to || x.bill_date || '') <= myDate);
-    const lastComment = prevBills.find((x) => x.review_note && x.status !== 'Submitted');
+    const comments = prevBills.filter((x) => x.review_note && x.status !== 'Submitted').slice(0, 3);
     const units = (x) => +(x.billed_kwh ?? x.import_kwh);
     const change = (a, p) => (a && p ? Math.round(((a - p) / p) * 100) : null);
     const pct = (v) => (v == null ? '' : ` (${v > 0 ? '+' : ''}${v}%)`);
@@ -1267,9 +1423,10 @@
     const yearAgo = earlier.find((x) => myDate && x.period_to && Math.abs((Date.parse(myDate) - Date.parse(x.period_to)) / 864e5 - 365) <= 25);
     const ctxBlock = (title, ...kids) => { const k = kids.flat().filter(Boolean); return k.length ? h('div', { class: 'ctx' }, h('h3', null, title), ...k) : null; };
     const context = h('div', { class: 'ctx-grid' },
-      ctxBlock('Your comment last time',
-        lastComment ? [h('p', { class: 'ctx-quote' }, lastComment.review_note), h('p', { class: 'muted' }, `On the bill to ${fmtDate(lastComment.period_to || lastComment.bill_date)} · ${lastComment.status.toLowerCase()}`)]
-          : h('p', { class: 'muted' }, 'No comment on earlier bills for this line.')),
+      ctxBlock(isOwner() ? 'Your earlier comments' : 'Harsha\'s earlier comments',
+        comments.length ? comments.map((x) => [h('p', { class: 'ctx-quote' }, x.review_note),
+          h('p', { class: 'muted small' }, `${monthOf(x)} bill · ${x.status.toLowerCase()}${x.reviewed_at ? ' on ' + fmtDate(istDate(x.reviewed_at)) : ''}`)])
+          : h('p', { class: 'muted' }, 'No comments on earlier bills for this line.')),
       ctxBlock('Against earlier bills',
         prev ? h('p', null, `Previous bill: ${n0(units(prev))} units, ₹${d3.format(',.0f')(prev.amount)}. This one is ${n0(units(b))} units${pct(change(units(b), units(prev)))}, ₹${d3.format(',.0f')(b.amount)}${pct(change(+b.amount, +prev.amount))}.`) : h('p', { class: 'muted' }, 'No earlier bill for this line.'),
         yearAgo ? h('p', null, `Same bill last year: ${n0(units(yearAgo))} units, ₹${d3.format(',.0f')(yearAgo.amount)}${pct(change(units(b), units(yearAgo)))} on units.`) : null,
@@ -1290,20 +1447,24 @@
     const review = async (status) => {
       if (status === 'Rejected' && !note.value.trim()) { toast('Add a note saying why the bill is rejected.', true); note.focus(); return; }
       await q(sb.from('solar_eb_bills').update({ status, review_note: note.value.trim() || null }).eq('id', b.id));
-      closeDialog(); toast(status === 'Approved' ? 'Bill approved' : 'Bill rejected'); refreshCounts(); route();
+      closeDialog(); toast(status === 'Approved' ? 'Bill approved. It can now be paid and its slip printed.' : 'Bill rejected'); refreshCounts(); route();
     };
     const kv = (k, v) => h('div', { class: 'field' }, h('label', null, k), h('div', { class: 'num' }, v));
     const ps = payState(b);
     const payDate = input('bd-paid', today(), { type: 'date', max: today() });
+    const paidFrom = input('bd-from', (co && co.pay_account) || '', { placeholder: 'Account paid from' });
+    const paidRef = input('bd-ref', '', { placeholder: 'UTR or cheque no.' });
     const setPaid = async (paid) => {
-      await q(sb.from('solar_eb_bills').update(paid ? { paid: true, paid_on: payDate.value || today(), paid_by_name: state.me.name } : { paid: false }).eq('id', b.id));
+      if (paid && /\d{6,}/.test(paidFrom.value.replace(/[\s-]/g, ''))) { toast('Type only the bank and last 4 digits of the account.', true); paidFrom.focus(); return; }
+      await q(sb.from('solar_eb_bills').update(paid ? { paid: true, paid_on: payDate.value || today(), paid_by_name: state.me.name, paid_from: paidFrom.value.trim() || null, paid_ref: paidRef.value.trim() || null } : { paid: false }).eq('id', b.id));
       closeDialog(); toast(paid ? 'Marked as paid' : 'Marked as not paid'); route();
     };
     const payRow = ps === 'none' ? null : h('div', { class: 'pay-row ' + ps }, b.paid
-      ? [h('strong', null, `Paid${b.paid_on ? ' on ' + fmtDate(b.paid_on) : ''}`), b.paid_by_name ? h('span', { class: 'muted' }, `marked by ${b.paid_by_name}`) : null,
+      ? [h('strong', null, `Paid${b.paid_on ? ' on ' + fmtDate(b.paid_on) : ''}${b.paid_from ? ' from ' + b.paid_from : ''}`), b.paid_ref ? h('span', null, 'ref ' + b.paid_ref) : null, b.paid_by_name ? h('span', { class: 'muted' }, `marked by ${b.paid_by_name}`) : null,
         canWrite() ? h('button', { class: 'link', onclick: () => setPaid(false) }, 'Mark as not paid') : null]
       : [h('strong', null, b.due_date ? `${ps === 'overdue' ? 'Not paid. Was due' : 'Not paid yet. Due'} ${fmtDate(b.due_date)}` : 'Not paid yet'),
-        canWrite() ? h('span', { class: 'pay-act' }, h('label', { for: 'bd-paid', class: 'muted' }, 'Paid on'), payDate, h('button', { class: 'btn', onclick: () => setPaid(true) }, 'Mark as paid')) : null]);
+        b.status !== 'Approved' ? h('span', { class: 'muted' }, 'Pay once Harsha approves it.')
+          : canWrite() ? h('span', { class: 'pay-act' }, h('label', { for: 'bd-paid', class: 'muted' }, 'Paid on'), payDate, paidFrom, paidRef, h('button', { class: 'btn', onclick: () => setPaid(true) }, 'Mark as paid')) : null]);
     openDialog(h('div', { class: 'dlg' },
       h('div', { class: 'dlg-head' }, h('h2', null, title), h('button', { type: 'button', class: 'link', onclick: closeDialog }, 'Close')),
       h('div', { class: 'form-grid' },
@@ -1312,7 +1473,10 @@
         kv('Units imported', n0(b.import_kwh)), kv('Units exported', n0(b.export_kwh)), kv('Units billed', n0(b.billed_kwh)),
         kv('Amount', b.amount == null ? '—' : '₹' + d3.format(',.0f')(b.amount)),
         kv('Uploaded', `${b.uploaded_by_name || ''} · ${d3.timeFormat('%-d %b %Y')(new Date(b.uploaded_at))}`),
-        kv('Status', b.status === 'Submitted' ? 'Awaiting approval' : b.status)),
+        kv('Status', b.status === 'Submitted' ? 'Awaiting approval' : b.status === 'Approved' ? `Approved${b.reviewed_by_name ? ' by ' + b.reviewed_by_name : ''}${b.reviewed_at ? ' · ' + fmtDate(istDate(b.reviewed_at)) : ''}` : b.status),
+        kv('Company', co ? co.name : 'Not set'), kv('Pay from', co && co.pay_account ? co.pay_account : '—')),
+      b.status === 'Approved' ? h('div', { class: 'approved-bar' }, h('strong', null, '✓ Approved for accounts'),
+        h('a', { class: 'btn', href: '#slip/' + b.id, onclick: closeDialog }, 'Print approval slip')) : null,
       payRow,
       b.notes ? h('p', null, b.notes) : null,
       link ? h('p', null, h('a', { href: link, target: '_blank', rel: 'noopener' }, 'Open the bill file')) : h('p', { class: 'muted' }, 'No file attached.'),
