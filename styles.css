@@ -1,23 +1,23 @@
 /* Solar Fleet: an operations console in daylight colours.
    Sun amber marks solar output, grid indigo marks EB units, red marks what needs a person. */
 :root {
-  --bg: #EDF1F3;
+  --bg: #F3F5F9;
   --panel: #FFFFFF;
-  --ink: #18242F;
-  --muted: #5C6B78;
-  --line: #D5DDE2;
-  --sun: #E09A12;
-  --sun-soft: #F6E2B5;
-  --grid: #4A58B0;
-  --grid-soft: #D9DDF3;
-  --bad: #C2402C;
-  --bad-soft: #F7DCD6;
-  --warn: #B26B00;
-  --ok: #2D8556;
-  --ok-soft: #D7EEDF;
-  --side: #18242F;
-  --side-ink: #C9D3DA;
-  --focus: #4A58B0;
+  --ink: #102A4C;
+  --muted: #5B6B80;
+  --line: #DCE2EB;
+  --sun: #C99A2E;
+  --sun-soft: #F5EAD0;
+  --grid: #2F5D9E;
+  --grid-soft: #DCE6F5;
+  --bad: #C0392B;
+  --bad-soft: #FBE3E0;
+  --warn: #A86F00;
+  --ok: #1F7A4D;
+  --ok-soft: #DDF1E6;
+  --side: #0E2546;
+  --side-ink: #C5D1E2;
+  --focus: #2F5D9E;
   --r: 6px;
   --body: 'Barlow', 'Segoe UI', system-ui, sans-serif;
   --display: 'Barlow Semi Condensed', 'Barlow', 'Arial Narrow', system-ui, sans-serif;
@@ -25,10 +25,10 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #111A21; --panel: #18232C; --ink: #E4EAEE; --muted: #93A2AE; --line: #2B3843;
-    --sun: #F0AE2E; --sun-soft: #4A3A16; --grid: #8B97E6; --grid-soft: #2A3060;
-    --bad: #F07A63; --bad-soft: #4A231C; --warn: #F0AE2E; --ok: #5CC28A; --ok-soft: #1E3B2B;
-    --side: #0B1116; --side-ink: #AEBBC5; --focus: #8B97E6;
+    --bg: #0C1626; --panel: #13213A; --ink: #E6ECF5; --muted: #95A4BA; --line: #26385A;
+    --sun: #E0B44E; --sun-soft: #3F3418; --grid: #7FA3DC; --grid-soft: #1E3358;
+    --bad: #F07A63; --bad-soft: #4A231C; --warn: #E0B44E; --ok: #5CC28A; --ok-soft: #173A29;
+    --side: #08111F; --side-ink: #A9B8CE; --focus: #7FA3DC;
     color-scheme: dark;
   }
 }
@@ -57,7 +57,7 @@ a { color: var(--grid); }
 .shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100%; }
 .side { background: var(--side); color: var(--side-ink); padding: 20px 12px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; height: 100vh; }
 .brand { display: flex; align-items: center; gap: 10px; font-family: var(--display); font-weight: 700; font-size: 1.2rem; color: #fff; padding: 0 10px 18px; }
-.sun { width: 18px; height: 18px; border-radius: 50%; background: var(--sun); box-shadow: 0 0 0 4px rgba(224, 154, 18, .25); }
+.sun { width: 18px; height: 18px; border-radius: 50%; background: var(--sun); box-shadow: 0 0 0 4px rgba(201, 154, 46, .3); }
 .side a { color: var(--side-ink); text-decoration: none; padding: 8px 10px; border-radius: var(--r); display: flex; justify-content: space-between; align-items: center; }
 .side a:hover { background: rgba(255, 255, 255, .06); color: #fff; }
 .side a[aria-current="page"] { background: rgba(255, 255, 255, .1); color: #fff; box-shadow: inset 3px 0 0 var(--sun); }
@@ -663,3 +663,13 @@ body { font-size: 16px; }
 .page-tabs { margin-bottom: -6px; }
 .seg { padding: 7px 14px; }
 @media (max-width: 640px) { main { padding: 18px 14px 40px; } .tile-v { font-size: 1.8rem; } }
+
+/* Vaikund colours: navy, green and gold */
+.btn.primary { background: var(--ink); border-color: var(--ink); }
+.btn.approve { background: var(--ok); border-color: var(--ok); color: #fff; }
+.seg[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); }
+.step-card { border-top-color: var(--sun) !important; }
+.ck-bar > div, .step-card .ck-bar > div { background: var(--ok); }
+.side .brand { color: #fff; }
+.side a[aria-current="page"] { background: rgba(201, 154, 46, .16); }
+a { color: var(--grid); }
