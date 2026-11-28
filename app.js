@@ -56,7 +56,10 @@
   }
   const closeDialog = () => $('#dialog').close();
   function pageHead(title, sub, ...right) {
-    return h('div', { class: 'page-head' }, h('div', null, h('h1', null, title), sub ? h('p', null, sub) : null), right.length ? h('div', { class: 'actions' }, right) : null);
+    // the explanation stays out of the way: a small ? opens it
+    return h('div', { class: 'page-head' }, h('div', { class: 'ph-title' }, h('h1', null, title),
+      sub ? h('details', { class: 'help' }, h('summary', { 'aria-label': 'What is this page?', title: 'What is this page?' }, '?'), h('p', null, sub)) : null),
+      right.length ? h('div', { class: 'actions' }, right) : null);
   }
 
   /* ---------- auth ---------- */
@@ -259,7 +262,7 @@
         h('span', null, h('strong', null, count('solar')), ' solar details'), h('span', null, h('strong', null, count('spare')), ' spare items checked')),
       h('p', { class: 'muted small ck-next' }, `Step 2, daily tracking: ${lineAll.filter((c) => fresh(lastLine.get(c.id))).length} of ${lineAll.length} EB lines and ${sysAll.filter((x) => fresh(lastSys.get(x.id))).length} of ${sysAll.length} solar systems send readings every day.`));
 
-    const pill = (c) => c.na ? null : c.ok
+    const pill = (c) => c.na || (c.ok && checkState.view !== 'done') ? null : c.ok
       ? h('span', { class: 'ck-pill ok', title: c.why || null }, '✓ ', c.label)
       : canWrite() ? h('button', { class: 'ck-pill miss', type: 'button', title: c.why, onclick: c.fix }, c.label) : h('span', { class: 'ck-pill miss', title: c.why }, c.label);
     const body = h('div');
@@ -361,7 +364,7 @@
   }
 
   /* ---------- dashboard: every site at a glance ---------- */
-  const dashState = { q: '', type: '', show: '' };
+  const dashState = { q: '', type: '', show: 'attention' };
   const siteState = { days: 30, tab: 'summary', key: '' };
   const billState = { view: 'week' };
   const istDate = (ts) => (ts ? new Date(Date.parse(ts) + 19800000).toISOString().slice(0, 10) : null);
@@ -510,7 +513,6 @@
     main.replaceChildren(
       pageHead('Dashboard', 'Finish setting up first: get every site\'s facts in, then get every system and EB line sending daily readings.', canWrite() ? h('button', { class: 'btn', onclick: () => newTask(sites) }, 'New task') : null),
       setupPanel,
-      h('h2', { class: 'dash-sub' }, 'Day to day'),
       tiles,
       h('div', { class: 'sec-head dg-bar' }, h('h2', null, 'Sites'), h('div', { class: 'segs', role: 'group', 'aria-label': 'Show' }, showAll, showAtt)),
       list);
@@ -1176,13 +1178,13 @@
     const whenText = (d) => (d < t0 ? 'was due ' + fmtDay(d) : d === t0 ? 'due today' : 'due ' + fmtDay(d));
     const dueRow = (t) => {
       const co = siteCo(t.conn.site_id), late = t.nextDue < t0;
-      if (!t.open) return row({ cls: late ? 'bad' : 'warn', name: lineName(t.conn), sub: `${whenText(t.nextDue)} (expected) · consumer no. ${t.conn.service_no || '—'} · pay from ${payFrom(co)}`,
+      if (!t.open) return row({ cls: late ? 'bad' : 'warn', name: lineName(t.conn), sub: `${whenText(t.nextDue)} · ${co ? co.name : 'no company set'}`,
         state: canWrite() ? 'Download and upload' : 'Not uploaded yet', onclick: () => (canWrite() ? uploadBill(sitesData, t.conn.site_id, t.conn.id) : null) });
       const b = t.open;
-      return row({ cls: late ? 'bad' : b.status === 'Approved' ? 'ok' : 'warn', name: `${lineName(t.conn)} · ${monthOf(b)}`, sub: `${whenText(t.nextDue)} · pay from ${payFrom(co)}`, amount: rupees(b.amount),
+      return row({ cls: late ? 'bad' : b.status === 'Approved' ? 'ok' : 'warn', name: `${lineName(t.conn)} · ${monthOf(b)}`, sub: `${whenText(t.nextDue)} · ${co ? co.name : 'no company set'}`, amount: rupees(b.amount),
         state: b.status === 'Submitted' ? 'Waiting for approval' : 'Approved · pay and print slip', onclick: () => billDetail(b) });
     };
-    const billRow = (b, state, cls) => row({ cls, name: `${b.site} · ${monthOf(b)}`, sub: [b.due_date ? whenText(b.due_date) : null, 'pay from ' + payFrom(siteCo(b.site_id))].filter(Boolean).join(' · '),
+    const billRow = (b, state, cls) => row({ cls, name: `${b.site} · ${monthOf(b)}`, sub: b.due_date ? whenText(b.due_date) : null,
       amount: rupees(b.amount), state, onclick: () => billDetail(b) });
     const group = (title, count, items) => (items.length ? h('section', { class: 'panel dg' }, h('div', { class: 'dg-head' }, h('h2', null, title), h('span', { class: 'muted' }, count)), h('ul', { class: 'plain dg-list' }, items)) : null);
     const waitMore = waiting.filter((b) => !dueIds.has(b.id)), payMore = toPay.filter((b) => !dueIds.has(b.id));

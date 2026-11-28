@@ -622,3 +622,13 @@ nav.side a .count { vertical-align: top; }
 .more-details summary { cursor: pointer; font-weight: 600; margin-bottom: 10px; }
 .form-sub { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
 @media (max-width: 520px) { .quick-figs { grid-template-columns: 1fr; } }
+/* less on screen: page explanations behind a ?, no secondary counts */
+.ph-title { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.ph-title h1 { margin: 0; }
+.help { position: relative; margin-top: 6px; }
+.help summary { list-style: none; cursor: pointer; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); display: grid; place-items: center; font-weight: 600; font-size: .85rem; background: var(--panel); }
+.help summary::-webkit-details-marker { display: none; }
+.help[open] summary { color: var(--ink); border-color: var(--ink); }
+.help p { flex-basis: 100%; max-width: 620px; margin: 8px 0 0; color: var(--muted); }
+.help[open] { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0; margin-top: 0; }
+.ck-counts, .ck-next, .step-next { display: none !important; }
